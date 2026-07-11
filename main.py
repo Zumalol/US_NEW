@@ -14,7 +14,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 300))
 
-# เปลี่ยนจาก Ollama มาใช้ Groq Cloud (ใช้ Llama3 ฟรี ไม่ต้องเปิดคอมตัวเอง)
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama3-8b-8192" 
 
@@ -27,17 +26,12 @@ TARGET_KEYWORDS = [
     'fed', 'fomc', 'powell', 'jerome', 'federal reserve', 'interest rate'
 ]
 
-# === ระบบ Flask Web Server (ทำเพื่อหลอกให้ Render ไม่สั่งปิดบอท) ===
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "🤖 บอทข่าวทองคำทำงานอยู่ปกติ 24/7!"
 
-def run_web_server():
-    # Render จะบังคับให้ใช้ Port ที่เขาจัดสรรให้ผ่าน Environment Variable
-    port = int(os.getenv("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
 # =========================================================
 
 def is_relevant_news(title, description):
@@ -58,14 +52,11 @@ def fetch_latest_news():
         return []
 
 def summarize_with_groq(news_title, news_description):
-    """ส่งข่าวไปให้ Groq Cloud (Llama3) สรุปแทน Ollama"""
     print("⏳ กำลังให้ Groq (Llama3) สรุปข่าว...")
-    
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-    
     prompt = (
         f"คุณคือนักวิเคราะห์ตลาดทองคำระดับโลก ช่วยสรุปข่าวนี้เป็น 'ภาษาไทย' สั้นๆ กระชับเข้าใจง่าย "
         f"และวิเคราะห์เจาะจงเลยว่าข่าวนี้ (โดยเฉพาะถ้าเกี่ยวกับนโยบาย Fed หรือ Trump) "
@@ -73,13 +64,11 @@ def summarize_with_groq(news_title, news_description):
         f"หัวข้อข่าว: {news_title}\n"
         f"รายละเอียด: {news_description}"
     )
-    
     payload = {
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3
     }
-    
     try:
         response = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
         if response.status_code == 200:
@@ -93,20 +82,22 @@ def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload)
+        res = requests.post(url, json=payload)
+        print(f"📡 ส่งข้อความไป Telegram ผลลัพธ์ HTTP: {res.status_code}")
     except Exception as e:
         print(f"❌ Error ระบบตอนส่ง Telegram: {e}")
 
 def bot_loop():
-    """ลูปเช็คข่าวสาร ย้ายมาทำงานในเบื้องหลัง (Background Thread)"""
-    print("🚀 บอทข่าวเริ่มสตาร์ทลูปค้นหาข่าวแล้ว...")
+    """ลูปเช็คข่าวสาร"""
+    print("🚀 [Background] บอทข่าวเริ่มสตาร์ทลูปค้นหาข่าวแล้ว...")
     
     initial_entries = fetch_latest_news()
     if len(initial_entries) > 0:
         for entry in initial_entries[1:]: 
             seen_news.add(entry.link)
             
-    send_telegram_message("✅ <b>บอทข่าวทองคำออนไลน์บน Cloud สำเร็จ!</b>")
+    print("📲 กำลังส่งข้อความเปิดบอทเข้า Telegram...")
+    send_telegram_message("✅ <b>บอทข่าวทองคำ (Gold/Fed/Trump) เริ่มทำงานบน Cloud แล้ว!</b> กำลังเฝ้าตลาดให้คุณปกติ 24 ชั่วโมง...")
 
     while True:
         try:
@@ -142,11 +133,13 @@ def bot_loop():
             print(f"❌ Error ในลูปบอท: {e}")
             time.sleep(60)
 
+# ================= ย้ายมาไว้ตรงนี้เพื่อให้ Gunicorn รันบอททันทีตอนเริ่มสคริปต์ =================
+bot_thread = Thread(target=bot_loop)
+bot_thread.daemon = True
+bot_thread.start()
+# =================================================================================
+
 if __name__ == "__main__":
-    # 1. แยกสคริปต์ตรวจข่าวไปรันด้านหลัง (Background)
-    bot_thread = Thread(target=bot_loop)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
-    # 2. รันหน้าเว็บ Flask ด้านหน้า (Foreground) เพื่อตอบรับ Render
-    run_web_server()
+    # บรรทัดนี้จะทำงานเฉพาะตอนรันในคอมตัวเอง (python main.py) เท่านั้น
+    port = int(os.getenv("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
