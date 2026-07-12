@@ -7,6 +7,7 @@ import traceback
 from datetime import datetime, timezone
 from threading import Thread, Lock
 from urllib.parse import quote_plus
+from calendar import timegm  # เพิ่มสำหรับแปลงเวลา RSS Feed เป็นเวลาสากลที่แม่นยำ
 
 import requests
 import feedparser
@@ -128,7 +129,7 @@ def now_text():
 def home():
     return """
     <h1>🤖 Verified Premium Financial News Bot</h1>
-    <p>Status: Active (Filtering 100% Direct Premium Feeds)</p>
+    <p>Status: Active (Filtering 100% Direct Premium Feeds | 24H Time Filter Enabled)</p>
     <ul>
         <li><a href="/health">/health</a></li>
         <li><a href="/test-news">/test-news</a></li>
@@ -188,7 +189,7 @@ def get_matched_keywords(title, description):
     return matches
 
 # =========================================================
-# FETCH ONE FEED (เน้นความเสถียรและดึงตรง)
+# FETCH ONE FEED
 # =========================================================
 
 def fetch_one_feed(url):
@@ -203,7 +204,7 @@ def fetch_one_feed(url):
         "Cache-Control": "no-cache",
     }
 
-    # METHOD 1: ดึงตรงจากสำนักข่าวหลัก (รวดเร็วและได้ลิงก์ดั้งเดิมแน่นอน)
+    # METHOD 1: ดึงตรงจากสำนักข่าวหลัก
     try:
         print("🔄 [Direct Fetch] กำลังดึงข้อมูลตรงจากสำนักข่าวหลัก...")
         response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
@@ -219,7 +220,7 @@ def fetch_one_feed(url):
     except Exception as e:
         print(f"⚠️ วิธีดึงตรงติดขัด: {e}")
 
-    # METHOD 2: ดึงผ่าน Proxy Fallback (เผื่อกรณี IP ของ Hosting โดนเซิร์ฟเวอร์ปลายทางตรวจสอบ)
+    # METHOD 2: ดึงผ่าน Proxy Fallback (กรณีคลาวด์โดนบล็อก IP)
     try:
         print("📡 [Proxy Fallback] ลองดึงผ่านเครือข่ายสำรองเพื่อความชัวร์...")
         encoded_url = quote_plus(url)
@@ -238,7 +239,7 @@ def fetch_one_feed(url):
     return []
 
 # =========================================================
-# FETCH ALL NEWS
+# FETCH ALL NEWS (เพิ่มระบบกรองเวลา 1 วันล่าสุด)
 # =========================================================
 
 def fetch_latest_news():
@@ -269,14 +270,33 @@ def fetch_latest_news():
 
         time.sleep(0.5)
 
-    # ป้องกันการส่งข่าวซ้ำในรอบเดียวกัน
+    # จัดการคัดกรองความซ้ำซ้อน และ กรองเวลาเฉพาะ 1 วันที่ผ่านมา
     unique_entries = []
     cycle_ids = set()
+    now = datetime.now(timezone.utc)
 
     for entry in all_entries:
         title = clean_text(entry.get("title", ""))
         if not title:
             continue
+
+        # -----------------------------------------------------------------
+        # ⏱️ ระบบกรองเวลา: ตรวจสอบข่าวสารย้อนหลังไม่เกิน 1 วัน (24 ชั่วโมง)
+        # -----------------------------------------------------------------
+        pub_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+        if pub_parsed:
+            try:
+                # แปลงเวลา struct_time ของ feedparser เป็น datetime object (UTC)
+                pub_date = datetime.fromtimestamp(timegm(pub_parsed), tz=timezone.utc)
+                age_seconds = (now - pub_date).total_seconds()
+                
+                # 24 ชั่วโมง = 86400 วินาที
+                if age_seconds > 86400:
+                    # เก่าเกิน 1 วัน -> ข้าม ไม่นำไปประมวลผลต่อ
+                    continue
+            except Exception as date_err:
+                print(f"⚠️ ไม่สามารถตรวจเช็คเวลาของข่าวได้ นำเข้าข่าวก่อนชั่วคราว: {date_err}")
+        # -----------------------------------------------------------------
 
         news_id = create_news_id(title)
         if news_id in cycle_ids:
@@ -290,7 +310,7 @@ def fetch_latest_news():
     last_status = "fetch_success" if unique_entries else "no_news_found"
 
     print("\n" + "=" * 70)
-    print(f"📰 UNIQUE PREMIUM NEWS FOUND: {len(unique_entries)}")
+    print(f"📰 UNIQUE PREMIUM NEWS FOUND (WITHIN 24H): {len(unique_entries)}")
     print("=" * 70)
 
     return unique_entries
@@ -398,7 +418,7 @@ def send_telegram(text):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False,  # เปิดไว้เพื่อให้แสดงพรีวิวหน้าเว็บของข่าวจริง
+        "disable_web_page_preview": False,
     }
 
     try:
@@ -409,7 +429,7 @@ def send_telegram(text):
         return False
 
 # =========================================================
-# PROCESS NEWS (คัดกรองลิงก์ที่เข้าอ่านได้จริงเท่านั้น)
+# PROCESS NEWS
 # =========================================================
 
 def process_news(entries):
@@ -428,7 +448,6 @@ def process_news(entries):
         link = entry.get("link", "").strip()
         source = get_source(entry)
 
-        # ตรวจสอบ: ต้องมีหัวข้อข่าว และลิงก์ต้องเริ่มต้นด้วย http เท่านั้น (คัดกรองลิงก์ขยะ/ลิงก์เสีย)
         if not title or not link or not link.startswith("http"):
             continue
 
@@ -498,7 +517,7 @@ def run_news_cycle():
 
         entries = fetch_latest_news()
         if not entries:
-            print("❌ ไม่พบข่าวจาก Premium Feeds ในรอบนี้")
+            print("❌ ไม่พบข่าวสดใหม่รอบ 24 ชั่วโมงจาก Premium Feeds ในรอบนี้")
             last_status = "no_news_found"
             return
 
@@ -570,7 +589,10 @@ def run_now():
 
     thread = Thread(target=run_news_cycle, daemon=True)
     thread.start()
-    return jsonify({"success": True, "message": "Premium news cycle started manually"})
+    return jsonify({
+        "success": True, 
+        "message": "Premium news cycle (Within 24H) started manually"
+    })
 
 def start_background_bot():
     global bot_started
