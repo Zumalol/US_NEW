@@ -90,7 +90,6 @@ TARGET_KEYWORDS = [
 seen_news = set()
 seen_news_lock = Lock()
 
-# ตัวแปรควบคุมไม่ให้ Thread ทำงานซ้อนกันหลายตัว
 bg_started = False
 bg_lock = Lock()
 
@@ -160,44 +159,65 @@ def is_relevant_news(title, description):
 
 
 # =========================================================
-# ดึงข่าวจากหลาย RSS
+# ดึงข่าวจากหลาย RSS (พร้อมระบบป้องกันและหลบเลี่ยง 503)
 # =========================================================
 
 def fetch_latest_news():
     all_entries = []
 
+    # ปรับเป็น Mobile User-Agent เพื่อให้กลมกลืนเหมือนการเปิดอ่านข่าวบน iPhone
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "Chrome/120.0 Safari/537.36"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 "
+            "Mobile/15E148 Safari/604.1"
         )
     }
 
     for rss_url in RSS_FEED_URLS:
+        feed = None
         try:
-            print(f"🌐 กำลังโหลด RSS: {rss_url}")
-
-            response = requests.get(
-                rss_url,
-                headers=headers,
-                timeout=15
-            )
-
+            print(f"🌐 กำลังโหลด RSS (Direct): {rss_url}")
+            response = requests.get(rss_url, headers=headers, timeout=15)
+            
+            # ตรวจสอบว่าโดนบล็อก IP หรือไม่
+            if response.status_code == 503:
+                print("⚠️ เจอข้อผิดพลาด 503 (IP ของ Render ถูกกั้น) -> กำลังเปิดใช้ Proxy สำรอง...")
+                raise requests.exceptions.HTTPError("503 Blocked")
+                
             response.raise_for_status()
             feed = feedparser.parse(response.content)
 
-            if feed.bozo:
-                print(
-                    f"⚠️ RSS Parse Warning: "
-                    f"{getattr(feed, 'bozo_exception', 'Unknown')}"
-                )
+        except Exception as e:
+            print(f"🔄 วิธีดึงตรงล้มเหลว ({e}) -> กำลังสลับไปดึงผ่าน Proxy บังตา...")
+            try:
+                # เข้ารหัส URL ป้องกันอักขระพิเศษพัง
+                encoded_url = requests.utils.quote(rss_url)
+                
+                # ลอง Proxy ตัวที่ 1
+                proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
+                print(f"📡 กำลังโหลดผ่าน Proxy: api.allorigins.win")
+                proxy_response = requests.get(proxy_url, headers=headers, timeout=20)
+                
+                if proxy_response.status_code == 200:
+                    feed = feedparser.parse(proxy_response.content)
+                else:
+                    # ลอง Proxy ตัวที่ 2 สำรองหากตัวแรกติดขัด
+                    proxy_url_2 = f"https://corsproxy.io/?{encoded_url}"
+                    print(f"📡 กำลังโหลดผ่าน Proxy สำรองตัวที่สอง: corsproxy.io")
+                    proxy_response_2 = requests.get(proxy_url_2, headers=headers, timeout=20)
+                    feed = feedparser.parse(proxy_response_2.content)
+                    
+            except Exception as proxy_err:
+                print(f"❌ ระบบ Proxy ก็ไม่สามารถเข้าถึงได้ในรอบนี้: {proxy_err}")
+                continue
 
+        # ตรวจสอบว่าได้ข่าวกลับมาไหม
+        if feed and hasattr(feed, "entries") and feed.entries:
             print(f"📥 พบ {len(feed.entries)} ข่าวจาก RSS นี้")
             all_entries.extend(feed.entries)
-
-        except Exception as e:
-            print(f"❌ Error fetching RSS: {e}")
+        else:
+            print("⚠️ ไม่พบข้อมูลข่าวสารในฟีดนี้ในรอบนี้")
 
     # -----------------------------------------------------
     # ตัดข่าวซ้ำระหว่าง Feed ต่างๆ
@@ -215,7 +235,7 @@ def fetch_latest_news():
             unique_keys.add(key)
             unique_entries.append(entry)
 
-    print(f"📰 รวมข่าวทั้งหมดหลังตัดข่าวซ้ำ: {len(unique_entries)} ข่าว")
+    print(f"📰 รวมข่าวทั้งหมดหลังตัดข่าวซ้ำสำเร็จ: {len(unique_entries)} ข่าว")
     return unique_entries
 
 
@@ -363,7 +383,7 @@ def get_news_source(entry):
 # =========================================================
 
 def initialize_seen_news():
-    print("🔄 กำลังโหลดข่าวเก่าจากทุกแหล่งข่าวเพื่อป้องกันการส่งข่าวย้อนหลัง...")
+    print("🔄 กำลังโหลดประวัติข่าวสารรอบแรกเพื่อเตรียมระบบป้องกันการส่งย้อนหลัง...")
     entries = fetch_latest_news()
 
     with seen_news_lock:
@@ -372,7 +392,7 @@ def initialize_seen_news():
             if link:
                 seen_news.add(link)
 
-    print(f"✅ บันทึกประวัติข่าวเก่าเรียบร้อยแล้วทั้งหมด {len(seen_news)} ข่าว")
+    print(f"✅ บันทึกประวัติข่าวเก่าเข้าหน่วยความจำชั่วคราวแล้ว {len(seen_news)} ข่าว")
 
 
 # =========================================================
@@ -380,21 +400,21 @@ def initialize_seen_news():
 # =========================================================
 
 def bot_loop():
-    print("🚀 [Background] Gold News Bot เริ่มรันลูปเต็มรูปแบบ...")
+    print("🚀 [Background] Gold News Bot เริ่มทำงานลูปสแกนหลัก...")
     validate_environment()
     
-    # ดึงข้อมูลจากทุกฟีดมาเก็บเป็นประวัติเริ่มต้นป้องกันสแปมข่าวเก่า
+    # ดึงข่าวมารอไว้ก่อนเพื่อเลี่ยงสแปมข่าวเก่าตอนกดเปิด
     initialize_seen_news()
 
     print("📲 ส่งข้อความแจ้งเปิดบอท...")
     send_telegram_message(
-        "✅ <b>Gold News Bot V2 ออนไลน์แล้ว!</b>\n\n"
-        "🥇 รันระบบตรวจสอบข่าวสาร 4 แหล่งข้อมูล:\n"
-        "1. Trump & Fed Monitor\n"
-        "2. Interest Rates & FOMC Update\n"
-        "3. Gold & XAUUSD Tracker\n"
-        "4. Trade War & Tariffs Economic Impact\n\n"
-        "🤖 ระบบกำลังตรวจสอบข่าวอัตโนมัติ 24/7"
+        "✅ <b>Gold News Bot V2 (Proxy Anti-503 Enabled)</b>\n\n"
+        "🥇 มอนิเตอร์ตลาดทองคำและนโยบายสหรัฐฯ:\n"
+        "1. Trump & Fed Dynamics\n"
+        "2. Interest Rates & FOMC Insights\n"
+        "3. Gold/XAUUSD Macro Focus\n"
+        "4. Global Trade & Tariffs Impact\n\n"
+        "🤖 ระบบหลบเลี่ยงการบล็อกทำงานอัตโนมัติ 24 ชั่วโมง"
     )
 
     while True:
@@ -421,12 +441,12 @@ def bot_loop():
                         seen_news.add(news_id)
                     continue
 
-                print(f"\n📰 พบข่าวใหม่: {title}")
+                print(f"\n📰 พบข่าวใหม่และตรงเงื่อนไข: {title}")
                 print(f"🏢 Source: {source}")
 
                 summary = summarize_with_groq(title, description, source)
 
-                # ทำความสะอาดข้อความป้องกันแท็กแปลกปลอมทำ HTML พัง
+                # ทำความสะอาดข้อความกัน HTML พัง
                 safe_title = html.escape(title)
                 safe_source = html.escape(source)
                 safe_summary = html.escape(summary)
@@ -447,32 +467,31 @@ def bot_loop():
                 if success:
                     with seen_news_lock:
                         seen_news.add(news_id)
-                    print("✅ ส่งข่าวสำเร็จ")
+                    print("✅ ส่งข่าวเรียบร้อย")
                 else:
-                    print("⚠️ ส่งไม่สำเร็จ จะลองใหม่รอบถัดไป")
+                    print("⚠️ ส่งข้อความไม่สำเร็จ จะทบไปพยายามใหม่รอบหน้า")
 
                 time.sleep(3)
 
-            print(f"😴 รอ {CHECK_INTERVAL} วินาที ก่อนตรวจสอบรอบใหม่...")
+            print(f"😴 รอ {CHECK_INTERVAL} วินาที ก่อนเริ่มต้นรอบถัดไป...")
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print(f"❌ Error ในลูปบอท: {e}")
+            print(f"❌ Error เกิดข้อผิดพลาดในลูปบอทหลัก: {e}")
             time.sleep(60)
 
 
 # =========================================================
-# LAZY INITIALIZATION (เทคนิคแก้ปัญหา Gunicorn/Render Lifecycle)
+# LAZY INITIALIZATION 
 # =========================================================
 
 @app.before_request
 def start_background_bot_safely():
-    """ฟังก์ชันนี้จะทำงานครั้งแรกและครั้งเดียวเมื่อมี Request หรือ Ping แรกวิ่งเข้าหาเว็บบอร์ด"""
     global bg_started
     if not bg_started:
         with bg_lock:
             if not bg_started:
-                print("🎬 [Flask Init] ตรวจพบการเรียกใช้งานหน้าเว็บครั้งแรก กำลังเริ่มต้น Background Bot ภายในกระบวนการหลัก...")
+                print("🎬 [Flask Init] ตรวจพบเว็บทราฟฟิกแรก เริ่มต้น Thread บอทข่าวในกระบวนการที่เสถียร...")
                 bot_thread = Thread(target=bot_loop, daemon=True)
                 bot_thread.start()
                 bg_started = True
