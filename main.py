@@ -3,43 +3,60 @@ import requests
 import os
 import feedparser
 import html
+import re
+import hashlib
 from threading import Thread, Lock
-from flask import Flask
+from flask import Flask, jsonify
 from dotenv import load_dotenv
+from urllib.parse import quote_plus
 
 load_dotenv()
 
 # =========================================================
-# ตั้งค่าระบบ
+# CONFIG
 # =========================================================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 300))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
+MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "5"))
+SEND_NEWS_ON_START = os.getenv("SEND_NEWS_ON_START", "true").lower() == "true"
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+
+# ถ้า model เดิมใช้ไม่ได้ ให้เปลี่ยนใน .env
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 
 # =========================================================
-# RSS FEEDS
+# RSS SEARCH QUERIES
 # =========================================================
+
+SEARCH_QUERIES = [
+    "Donald Trump Federal Reserve",
+    "Trump Fed Powell",
+    "Federal Reserve FOMC interest rates",
+    "Jerome Powell interest rates",
+    "Gold Federal Reserve",
+    "Gold XAUUSD Fed",
+    "US inflation CPI Federal Reserve",
+    "US jobs NFP Federal Reserve",
+    "Trump tariffs dollar gold",
+]
 
 RSS_FEED_URLS = [
-    # Trump + Federal Reserve
-    "https://news.google.com/rss/search?q=Trump+Federal+Reserve+OR+Fed&hl=en-US&gl=US&ceid=US:en",
-
-    # Fed + FOMC + Interest Rates
-    "https://news.google.com/rss/search?q=Federal+Reserve+interest+rates+FOMC+Powell&hl=en-US&gl=US&ceid=US:en",
-
-    # Gold + Fed
-    "https://news.google.com/rss/search?q=Gold+XAUUSD+Federal+Reserve+Fed&hl=en-US&gl=US&ceid=US:en",
-
-    # Trump + Gold + Dollar
-    "https://news.google.com/rss/search?q=Trump+Gold+Dollar+Tariffs&hl=en-US&gl=US&ceid=US:en",
+    (
+        "https://news.google.com/rss/search?"
+        f"q={quote_plus(query)}"
+        "&hl=en-US&gl=US&ceid=US:en"
+    )
+    for query in SEARCH_QUERIES
 ]
+
+# เพิ่ม FXStreet เป็นแหล่งสำรอง
+RSS_FEED_URLS.append("https://www.fxstreet.com/rss/news")
 
 
 # =========================================================
@@ -47,454 +64,914 @@ RSS_FEED_URLS = [
 # =========================================================
 
 TARGET_KEYWORDS = [
-    # Gold
+    # GOLD
     "gold",
     "xau",
     "xauusd",
-    "ทอง",
+    "bullion",
 
-    # Trump
+    # TRUMP
     "trump",
     "donald trump",
-    "ทรัมป์",
 
-    # Federal Reserve
+    # FED
     "fed",
     "fomc",
+    "federal reserve",
     "powell",
     "jerome powell",
-    "federal reserve",
 
-    # Monetary policy
+    # INTEREST RATE
     "interest rate",
     "rate cut",
+    "rate cuts",
     "rate hike",
-    "inflation",
+    "monetary policy",
 
-    # US economy / USD
+    # ECONOMIC DATA
+    "inflation",
+    "cpi",
+    "pce",
+    "nonfarm",
+    "non-farm",
+    "nfp",
+    "jobs report",
+    "unemployment",
+
+    # USD / BONDS
     "dollar",
     "usd",
     "treasury",
     "bond yield",
+    "yields",
 
-    # Trump policies
+    # TRUMP POLICY
     "tariff",
+    "tariffs",
     "trade war",
 ]
 
 
 # =========================================================
-# GLOBAL VARIABLES & LOCKS
+# GLOBAL VARIABLES
 # =========================================================
 
 seen_news = set()
 seen_news_lock = Lock()
 
-bg_started = False
-bg_lock = Lock()
+bot_started = False
+bot_lock = Lock()
+
+last_check_time = None
+last_news_count = 0
 
 app = Flask(__name__)
 
 
 # =========================================================
-# WEB SERVER
+# WEB ROUTES
 # =========================================================
 
 @app.route("/")
 def home():
     return """
-    <h1>🤖 Gold News Bot</h1>
-    <p>สถานะ: ทำงานปกติ 24/7</p>
-    <p>ติดตามข่าว: Gold / Fed / FOMC / Powell / Trump</p>
+    <h1>🤖 Gold / Trump / Fed News Bot</h1>
+    <p>สถานะ: ทำงานปกติ</p>
+    <p>ติดตาม Gold, Trump, Fed, FOMC, Powell, CPI, NFP</p>
+    <p><a href="/health">ดูสถานะระบบ</a></p>
     """
 
 
 @app.route("/health")
 def health():
-    return {
+    return jsonify({
         "status": "ok",
-        "bot": "Gold/Fed/Trump News Bot",
+        "bot_started": bot_started,
         "seen_news": len(seen_news),
+        "last_news_count": last_news_count,
+        "last_check_time": last_check_time,
         "check_interval": CHECK_INTERVAL,
-    }
+        "rss_feeds": len(RSS_FEED_URLS),
+    })
 
 
 # =========================================================
-# ตรวจสอบ Environment Variables
+# VALIDATE ENV
 # =========================================================
 
 def validate_environment():
-    missing = []
 
-    if not TELEGRAM_TOKEN:
-        missing.append("TELEGRAM_TOKEN")
+    print("=" * 60)
+    print("🔧 ตรวจสอบ Environment Variables")
 
-    if not TELEGRAM_CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
+    if TELEGRAM_TOKEN:
+        print("✅ TELEGRAM_TOKEN: OK")
+    else:
+        print("❌ TELEGRAM_TOKEN: NOT FOUND")
 
-    if not GROQ_API_KEY:
-        missing.append("GROQ_API_KEY")
+    if TELEGRAM_CHAT_ID:
+        print("✅ TELEGRAM_CHAT_ID: OK")
+    else:
+        print("❌ TELEGRAM_CHAT_ID: NOT FOUND")
 
-    if missing:
-        print("⚠️ Environment Variables ที่ยังไม่มี:")
-        for item in missing:
-            print(f"   - {item}")
-        return False
+    if GROQ_API_KEY:
+        print("✅ GROQ_API_KEY: OK")
+    else:
+        print("❌ GROQ_API_KEY: NOT FOUND")
 
-    print("✅ Environment Variables พร้อมใช้งาน")
-    return True
+    print("=" * 60)
 
 
 # =========================================================
-# กรองข่าว
+# CLEAN HTML DESCRIPTION
+# =========================================================
+
+def clean_description(description):
+
+    if not description:
+        return ""
+
+    # ลบ HTML
+    clean = re.sub(r"<[^>]+>", " ", description)
+
+    # Decode HTML entities
+    clean = html.unescape(clean)
+
+    # ลบช่องว่างซ้ำ
+    clean = re.sub(r"\s+", " ", clean)
+
+    return clean.strip()
+
+
+# =========================================================
+# NEWS ID
+# =========================================================
+
+def create_news_id(title, link):
+
+    # ใช้ title เป็นหลัก เพราะ Google News
+    # อาจมี URL ต่างกันแต่เป็นข่าวเดียวกัน
+
+    text = title.lower().strip()
+
+    if not text:
+        text = link
+
+    return hashlib.md5(
+        text.encode("utf-8")
+    ).hexdigest()
+
+
+# =========================================================
+# FILTER NEWS
 # =========================================================
 
 def is_relevant_news(title, description):
-    text_to_check = f"{title} {description}".lower()
 
-    return any(
-        keyword.lower() in text_to_check
-        for keyword in TARGET_KEYWORDS
-    )
+    text = (
+        f"{title} {description}"
+    ).lower()
+
+    matched_keywords = []
+
+    for keyword in TARGET_KEYWORDS:
+
+        if keyword.lower() in text:
+            matched_keywords.append(keyword)
+
+    if matched_keywords:
+
+        print(
+            f"   🎯 Keyword: "
+            f"{', '.join(matched_keywords[:5])}"
+        )
+
+        return True
+
+    return False
 
 
 # =========================================================
-# ดึงข่าวจากหลาย RSS (พร้อมระบบป้องกันและหลบเลี่ยง 503)
+# FETCH ONE RSS
+# =========================================================
+
+def fetch_single_feed(rss_url):
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "Chrome/131.0 Safari/537.36"
+        ),
+        "Accept": (
+            "application/rss+xml,"
+            "application/xml,"
+            "text/xml,"
+            "*/*"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+
+        response = requests.get(
+            rss_url,
+            headers=headers,
+            timeout=20,
+            allow_redirects=True,
+        )
+
+        print(
+            f"   HTTP {response.status_code}"
+        )
+
+        if response.status_code != 200:
+            return []
+
+        if not response.content:
+            print("   ⚠️ Response ว่าง")
+            return []
+
+        feed = feedparser.parse(
+            response.content
+        )
+
+        if feed.bozo:
+            print(
+                f"   ⚠️ Feed warning: "
+                f"{feed.bozo_exception}"
+            )
+
+        entries = list(
+            getattr(feed, "entries", [])
+        )
+
+        print(
+            f"   📥 พบ {len(entries)} ข่าว"
+        )
+
+        return entries
+
+    except requests.exceptions.Timeout:
+
+        print("   ❌ Timeout")
+        return []
+
+    except Exception as e:
+
+        print(
+            f"   ❌ Fetch Error: {e}"
+        )
+
+        return []
+
+
+# =========================================================
+# FETCH ALL NEWS
 # =========================================================
 
 def fetch_latest_news():
+
+    global last_news_count
+    global last_check_time
+
+    print("\n" + "=" * 60)
+    print("🌍 เริ่มค้นหาข่าวจากทุกแหล่ง")
+    print("=" * 60)
+
     all_entries = []
 
-    # ปรับเป็น Mobile User-Agent เพื่อให้กลมกลืนเหมือนการเปิดอ่านข่าวบน iPhone
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 "
-            "Mobile/15E148 Safari/604.1"
+    for index, rss_url in enumerate(
+        RSS_FEED_URLS,
+        start=1
+    ):
+
+        print(
+            f"\n🌐 Feed "
+            f"{index}/{len(RSS_FEED_URLS)}"
         )
-    }
 
-    for rss_url in RSS_FEED_URLS:
-        feed = None
-        try:
-            print(f"🌐 กำลังโหลด RSS (Direct): {rss_url}")
-            response = requests.get(rss_url, headers=headers, timeout=15)
-            
-            # ตรวจสอบว่าโดนบล็อก IP หรือไม่
-            if response.status_code == 503:
-                print("⚠️ เจอข้อผิดพลาด 503 (IP ของ Render ถูกกั้น) -> กำลังเปิดใช้ Proxy สำรอง...")
-                raise requests.exceptions.HTTPError("503 Blocked")
-                
-            response.raise_for_status()
-            feed = feedparser.parse(response.content)
+        entries = fetch_single_feed(
+            rss_url
+        )
 
-        except Exception as e:
-            print(f"🔄 วิธีดึงตรงล้มเหลว ({e}) -> กำลังสลับไปดึงผ่าน Proxy บังตา...")
-            try:
-                # เข้ารหัส URL ป้องกันอักขระพิเศษพัง
-                encoded_url = requests.utils.quote(rss_url)
-                
-                # ลอง Proxy ตัวที่ 1
-                proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
-                print(f"📡 กำลังโหลดผ่าน Proxy: api.allorigins.win")
-                proxy_response = requests.get(proxy_url, headers=headers, timeout=20)
-                
-                if proxy_response.status_code == 200:
-                    feed = feedparser.parse(proxy_response.content)
-                else:
-                    # ลอง Proxy ตัวที่ 2 สำรองหากตัวแรกติดขัด
-                    proxy_url_2 = f"https://corsproxy.io/?{encoded_url}"
-                    print(f"📡 กำลังโหลดผ่าน Proxy สำรองตัวที่สอง: corsproxy.io")
-                    proxy_response_2 = requests.get(proxy_url_2, headers=headers, timeout=20)
-                    feed = feedparser.parse(proxy_response_2.content)
-                    
-            except Exception as proxy_err:
-                print(f"❌ ระบบ Proxy ก็ไม่สามารถเข้าถึงได้ในรอบนี้: {proxy_err}")
-                continue
+        all_entries.extend(entries)
 
-        # ตรวจสอบว่าได้ข่าวกลับมาไหม
-        if feed and hasattr(feed, "entries") and feed.entries:
-            print(f"📥 พบ {len(feed.entries)} ข่าวจาก RSS นี้")
-            all_entries.extend(feed.entries)
-        else:
-            print("⚠️ ไม่พบข้อมูลข่าวสารในฟีดนี้ในรอบนี้")
+        # เว้นระยะเล็กน้อย
+        time.sleep(0.5)
 
-    # -----------------------------------------------------
-    # ตัดข่าวซ้ำระหว่าง Feed ต่างๆ
-    # -----------------------------------------------------
+    # =====================================================
+    # REMOVE DUPLICATES
+    # =====================================================
+
     unique_entries = []
-    unique_keys = set()
+    unique_ids = set()
 
     for entry in all_entries:
-        link = entry.get("link", "")
-        title = entry.get("title", "")
 
-        key = link if link else title.lower().strip()
+        title = entry.get(
+            "title",
+            ""
+        ).strip()
 
-        if key and key not in unique_keys:
-            unique_keys.add(key)
-            unique_entries.append(entry)
+        link = entry.get(
+            "link",
+            ""
+        ).strip()
 
-    print(f"📰 รวมข่าวทั้งหมดหลังตัดข่าวซ้ำสำเร็จ: {len(unique_entries)} ข่าว")
+        if not title:
+            continue
+
+        news_id = create_news_id(
+            title,
+            link
+        )
+
+        if news_id in unique_ids:
+            continue
+
+        unique_ids.add(news_id)
+        unique_entries.append(entry)
+
+    last_news_count = len(unique_entries)
+
+    last_check_time = time.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    print("\n" + "=" * 60)
+
+    print(
+        f"📊 ข่าวดิบทั้งหมด: "
+        f"{len(all_entries)}"
+    )
+
+    print(
+        f"📊 หลังตัดข่าวซ้ำ: "
+        f"{len(unique_entries)}"
+    )
+
+    print("=" * 60)
+
     return unique_entries
 
 
 # =========================================================
-# วิเคราะห์ข่าวด้วย Groq
+# GET SOURCE
 # =========================================================
 
-def summarize_with_groq(news_title, news_description, news_source=""):
-    print("🤖 กำลังให้ Groq วิเคราะห์ข่าว...")
+def get_news_source(entry):
+
+    try:
+
+        source = entry.get(
+            "source",
+            {}
+        )
+
+        if isinstance(source, dict):
+
+            source_title = source.get(
+                "title"
+            )
+
+            if source_title:
+                return source_title
+
+    except Exception:
+        pass
+
+    return "News"
+
+
+# =========================================================
+# GROQ AI
+# =========================================================
+
+def summarize_with_groq(
+    news_title,
+    news_description,
+    news_source
+):
 
     if not GROQ_API_KEY:
-        return "❌ 不พบ GROQ_API_KEY"
+
+        return (
+            "⚠️ ไม่พบ GROQ_API_KEY "
+            "จึงยังไม่ได้วิเคราะห์ด้วย AI"
+        )
+
+    print(
+        "🤖 กำลังวิเคราะห์ด้วย Groq..."
+    )
 
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
+        "Authorization":
+            f"Bearer {GROQ_API_KEY}",
+
+        "Content-Type":
+            "application/json",
     }
 
     prompt = f"""
-คุณคือนักวิเคราะห์ตลาดการเงินและทองคำระดับมืออาชีพ
+คุณคือนักวิเคราะห์ข่าวเศรษฐกิจมหภาค
+และตลาดทองคำ XAUUSD
 
-วิเคราะห์ข่าวต่อไปนี้เป็นภาษาไทย
+วิเคราะห์ข่าวนี้เป็นภาษาไทย
 
-หัวข้อข่าว:
+หัวข้อ:
 {news_title}
 
-รายละเอียดข่าว:
+รายละเอียด:
 {news_description}
 
 แหล่งข่าว:
 {news_source}
 
-ให้ตอบตามรูปแบบนี้:
+ตอบตามรูปแบบนี้:
 
 📌 สรุปข่าว:
-สรุปสั้น กระชับ และเข้าใจง่าย
+สรุปใจความสำคัญแบบสั้นและชัดเจน
 
-🏦 ผลกระทบต่อ Fed / ดอกเบี้ย:
-อธิบายว่าข่าวนี้อาจส่งผลต่อแนวโน้มดอกเบี้ยของ Federal Reserve อย่างไร
+🏦 ผลต่อ Fed / ดอกเบี้ย:
+วิเคราะห์ผลที่เป็นไปได้
 
-💵 ผลกระทบต่อ USD:
-วิเคราะห์ว่าเป็นบวกหรือลบต่อดอลลาร์
+💵 ผลต่อ USD:
+ระบุ BULLISH / BEARISH / UNCERTAIN
+พร้อมเหตุผล
 
-🥇 ผลกระทบต่อ GOLD / XAUUSD:
-เลือกเพียงหนึ่งแนวโน้มหลัก:
+🥇 ผลต่อ GOLD / XAUUSD:
+ระบุเพียงหนึ่ง:
 🟢 BULLISH
 🔴 BEARISH
 🟡 UNCERTAIN
 
-อธิบายเหตุผลสั้น ๆ
+พร้อมเหตุผล
 
-⚠️ ความสำคัญของข่าว:
-เลือก LOW / MEDIUM / HIGH
+⚠️ ความสำคัญ:
+LOW / MEDIUM / HIGH
 
-ห้ามรับประกันว่าราคาจะขึ้นหรือลงแน่นอน
-ต้องแยกข้อเท็จจริงจากการคาดการณ์
+ห้ามรับประกันทิศทางราคา
+และต้องแยกข้อเท็จจริงออกจากการคาดการณ์
 """
 
     payload = {
         "model": GROQ_MODEL,
+
         "messages": [
             {
                 "role": "system",
-                "content": "You are a professional macroeconomic and gold market analyst.",
+                "content": (
+                    "You are a professional "
+                    "macroeconomic and gold "
+                    "market news analyst."
+                ),
             },
             {
                 "role": "user",
                 "content": prompt,
             },
         ],
+
         "temperature": 0.2,
+
         "max_tokens": 800,
     }
 
     try:
+
         response = requests.post(
             GROQ_URL,
-            json=payload,
             headers=headers,
-            timeout=45,
+            json=payload,
+            timeout=60,
+        )
+
+        print(
+            f"🤖 Groq HTTP: "
+            f"{response.status_code}"
         )
 
         if response.status_code == 200:
-            data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
 
-        print(f"❌ Groq HTTP {response.status_code}: {response.text}")
-        return f"❌ Groq Error HTTP {response.status_code}"
+            data = response.json()
+
+            return (
+                data["choices"][0]
+                ["message"]
+                ["content"]
+                .strip()
+            )
+
+        print(
+            f"❌ Groq Error: "
+            f"{response.text}"
+        )
+
+        return (
+            f"⚠️ AI วิเคราะห์ไม่สำเร็จ "
+            f"HTTP {response.status_code}"
+        )
 
     except Exception as e:
-        print(f"❌ ไม่สามารถเชื่อมต่อ Groq: {e}")
-        return f"❌ ไม่สามารถเชื่อมต่อกับ Groq ได้: {e}"
+
+        print(
+            f"❌ Groq Exception: {e}"
+        )
+
+        return (
+            "⚠️ ไม่สามารถเชื่อมต่อ "
+            "AI ได้ในขณะนี้"
+        )
 
 
 # =========================================================
-# ส่ง Telegram
+# TELEGRAM
 # =========================================================
 
 def send_telegram_message(text):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ ไม่มี TELEGRAM_TOKEN หรือ TELEGRAM_CHAT_ID")
+
+    if not TELEGRAM_TOKEN:
+        print("❌ TELEGRAM_TOKEN ไม่มี")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    if not TELEGRAM_CHAT_ID:
+        print("❌ TELEGRAM_CHAT_ID ไม่มี")
+        return False
 
+    url = (
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+    )
+
+    # Telegram จำกัดข้อความ
     if len(text) > 4000:
-        text = text[:4000] + "\n\n...ข้อความถูกตัด"
+        text = (
+            text[:3950]
+            + "\n\n...ข้อความถูกตัด"
+        )
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False,
+        "disable_web_page_preview": True,
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=20)
-        print(f"📡 Telegram HTTP: {response.status_code}")
-        
+
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=30,
+        )
+
+        print(
+            f"📡 Telegram HTTP: "
+            f"{response.status_code}"
+        )
+
         if response.status_code != 200:
-            print(f"❌ Telegram Error: {response.text}")
+
+            print(
+                f"❌ Telegram Error: "
+                f"{response.text}"
+            )
+
             return False
+
         return True
+
     except Exception as e:
-        print(f"❌ Error ตอนส่ง Telegram: {e}")
+
+        print(
+            f"❌ Telegram Exception: {e}"
+        )
+
         return False
 
 
 # =========================================================
-# ดึงชื่อ Source ข่าว
+# PROCESS NEWS
 # =========================================================
 
-def get_news_source(entry):
-    try:
-        source = entry.get("source", {})
-        if isinstance(source, dict):
-            return source.get("title", "Google News")
-    except Exception:
-        pass
-    return "Google News"
+def process_news(
+    entries,
+    max_send=5
+):
+
+    sent_count = 0
+
+    # ข่าวล่าสุดมาก่อน
+    for entry in entries:
+
+        if sent_count >= max_send:
+            break
+
+        title = entry.get(
+            "title",
+            "ไม่มีหัวข้อ"
+        ).strip()
+
+        raw_description = entry.get(
+            "summary",
+            entry.get(
+                "description",
+                ""
+            )
+        )
+
+        description = clean_description(
+            raw_description
+        )
+
+        link = entry.get(
+            "link",
+            ""
+        ).strip()
+
+        source = get_news_source(
+            entry
+        )
+
+        news_id = create_news_id(
+            title,
+            link
+        )
+
+        # -------------------------------
+        # CHECK SEEN
+        # -------------------------------
+
+        with seen_news_lock:
+
+            if news_id in seen_news:
+                continue
+
+        print(
+            f"\n🔎 ตรวจข่าว: {title}"
+        )
+
+        # -------------------------------
+        # FILTER
+        # -------------------------------
+
+        if not is_relevant_news(
+            title,
+            description
+        ):
+
+            print(
+                "   ⏭️ ไม่ตรง Keyword"
+            )
+
+            with seen_news_lock:
+                seen_news.add(news_id)
+
+            continue
+
+        print(
+            "   ✅ ข่าวตรงเงื่อนไข"
+        )
+
+        # -------------------------------
+        # AI
+        # -------------------------------
+
+        summary = summarize_with_groq(
+            title,
+            description,
+            source
+        )
+
+        # -------------------------------
+        # SAFE HTML
+        # -------------------------------
+
+        safe_title = html.escape(
+            title
+        )
+
+        safe_source = html.escape(
+            source
+        )
+
+        safe_summary = html.escape(
+            summary
+        )
+
+        safe_link = html.escape(
+            link,
+            quote=True
+        )
+
+        # -------------------------------
+        # MESSAGE
+        # -------------------------------
+
+        message = (
+            "🚨 <b>GOLD MARKET UPDATE</b>\n\n"
+
+            f"📰 <b>หัวข้อ:</b>\n"
+            f"{safe_title}\n\n"
+
+            f"🏢 <b>แหล่งข่าว:</b> "
+            f"{safe_source}\n\n"
+
+            f"🤖 <b>AI วิเคราะห์:</b>\n"
+            f"{safe_summary}\n\n"
+        )
+
+        if link:
+
+            message += (
+                f"🔗 <a href=\"{safe_link}\">"
+                "อ่านข่าว"
+                "</a>"
+            )
+
+        # -------------------------------
+        # SEND
+        # -------------------------------
+
+        success = send_telegram_message(
+            message
+        )
+
+        if success:
+
+            with seen_news_lock:
+                seen_news.add(news_id)
+
+            sent_count += 1
+
+            print(
+                f"✅ ส่งข่าวสำเร็จ "
+                f"({sent_count}/{max_send})"
+            )
+
+        else:
+
+            print(
+                "⚠️ ส่งไม่สำเร็จ "
+                "จะลองใหม่รอบหน้า"
+            )
+
+        time.sleep(2)
+
+    print(
+        f"\n📨 รอบนี้ส่งข่าวทั้งหมด "
+        f"{sent_count} ข่าว"
+    )
+
+    return sent_count
 
 
 # =========================================================
-# เตรียมข่าวเก่า ตอนเปิดบอท
-# =========================================================
-
-def initialize_seen_news():
-    print("🔄 กำลังโหลดประวัติข่าวสารรอบแรกเพื่อเตรียมระบบป้องกันการส่งย้อนหลัง...")
-    entries = fetch_latest_news()
-
-    with seen_news_lock:
-        for entry in entries:
-            link = entry.get("link", "")
-            if link:
-                seen_news.add(link)
-
-    print(f"✅ บันทึกประวัติข่าวเก่าเข้าหน่วยความจำชั่วคราวแล้ว {len(seen_news)} ข่าว")
-
-
-# =========================================================
-# BOT MAIN LOOP
+# BOT LOOP
 # =========================================================
 
 def bot_loop():
-    print("🚀 [Background] Gold News Bot เริ่มทำงานลูปสแกนหลัก...")
-    validate_environment()
-    
-    # ดึงข่าวมารอไว้ก่อนเพื่อเลี่ยงสแปมข่าวเก่าตอนกดเปิด
-    initialize_seen_news()
 
-    print("📲 ส่งข้อความแจ้งเปิดบอท...")
+    print("\n🚀 GOLD NEWS BOT STARTED")
+
+    validate_environment()
+
     send_telegram_message(
-        "✅ <b>Gold News Bot V2 (Proxy Anti-503 Enabled)</b>\n\n"
-        "🥇 มอนิเตอร์ตลาดทองคำและนโยบายสหรัฐฯ:\n"
-        "1. Trump & Fed Dynamics\n"
-        "2. Interest Rates & FOMC Insights\n"
-        "3. Gold/XAUUSD Macro Focus\n"
-        "4. Global Trade & Tariffs Impact\n\n"
-        "🤖 ระบบหลบเลี่ยงการบล็อกทำงานอัตโนมัติ 24 ชั่วโมง"
+        "✅ <b>Gold / Trump / Fed News Bot เริ่มทำงานแล้ว</b>\n\n"
+        "🔎 กำลังค้นหาข่าวทันที...\n"
+        "🥇 Gold / XAUUSD\n"
+        "🇺🇸 Donald Trump\n"
+        "🏦 Fed / FOMC / Powell\n"
+        "📊 CPI / PCE / NFP\n"
+        "💵 USD / Treasury Yields"
     )
 
+    first_run = True
+
     while True:
+
         try:
-            print(f"\n🔄 ตรวจสอบข่าวเวลา {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            print(
+                "\n🔄 เริ่มรอบค้นหาข่าวใหม่"
+            )
+
             entries = fetch_latest_news()
 
-            for entry in reversed(entries):
-                title = entry.get("title", "ไม่มีหัวข้อ")
-                description = entry.get("description", "")
-                link = entry.get("link", "")
-                source = get_news_source(entry)
+            if not entries:
 
-                news_id = link if link else title.lower().strip()
-
-                with seen_news_lock:
-                    already_seen = (news_id in seen_news)
-
-                if already_seen:
-                    continue
-
-                if not is_relevant_news(title, description):
-                    with seen_news_lock:
-                        seen_news.add(news_id)
-                    continue
-
-                print(f"\n📰 พบข่าวใหม่และตรงเงื่อนไข: {title}")
-                print(f"🏢 Source: {source}")
-
-                summary = summarize_with_groq(title, description, source)
-
-                # ทำความสะอาดข้อความกัน HTML พัง
-                safe_title = html.escape(title)
-                safe_source = html.escape(source)
-                safe_summary = html.escape(summary)
-                safe_link = html.escape(link, quote=True)
-
-                message = (
-                    "🚨 <b>GOLD MARKET UPDATE</b>\n\n"
-                    f"📰 <b>หัวข้อ:</b>\n{safe_title}\n\n"
-                    f"🏢 <b>แหล่งข่าว:</b> {safe_source}\n\n"
-                    f"🤖 <b>AI วิเคราะห์:</b>\n{safe_summary}\n\n"
+                print(
+                    "⚠️ ไม่พบข่าวจาก RSS "
+                    "จะลองใหม่รอบถัดไป"
                 )
 
-                if link:
-                    message += f"🔗 <a href=\"{safe_link}\">อ่านข่าวต้นฉบับ</a>"
+            else:
 
-                success = send_telegram_message(message)
+                print(
+                    f"🔍 กำลังตรวจสอบ "
+                    f"{len(entries)} ข่าว"
+                )
 
-                if success:
-                    with seen_news_lock:
-                        seen_news.add(news_id)
-                    print("✅ ส่งข่าวเรียบร้อย")
+                if first_run:
+
+                    if SEND_NEWS_ON_START:
+
+                        print(
+                            "🔥 รอบแรก: "
+                            "ส่งข่าวล่าสุดทันที"
+                        )
+
+                        process_news(
+                            entries,
+                            MAX_NEWS_PER_CYCLE
+                        )
+
+                    else:
+
+                        print(
+                            "📝 รอบแรก: "
+                            "บันทึกข่าวโดยไม่ส่ง"
+                        )
+
+                        for entry in entries:
+
+                            title = entry.get(
+                                "title",
+                                ""
+                            )
+
+                            link = entry.get(
+                                "link",
+                                ""
+                            )
+
+                            news_id = create_news_id(
+                                title,
+                                link
+                            )
+
+                            with seen_news_lock:
+                                seen_news.add(
+                                    news_id
+                                )
+
+                    first_run = False
+
                 else:
-                    print("⚠️ ส่งข้อความไม่สำเร็จ จะทบไปพยายามใหม่รอบหน้า")
 
-                time.sleep(3)
+                    process_news(
+                        entries,
+                        MAX_NEWS_PER_CYCLE
+                    )
 
-            print(f"😴 รอ {CHECK_INTERVAL} วินาที ก่อนเริ่มต้นรอบถัดไป...")
-            time.sleep(CHECK_INTERVAL)
+            print(
+                f"\n😴 รอ {CHECK_INTERVAL} "
+                "วินาทีก่อนค้นหาใหม่"
+            )
+
+            time.sleep(
+                CHECK_INTERVAL
+            )
 
         except Exception as e:
-            print(f"❌ Error เกิดข้อผิดพลาดในลูปบอทหลัก: {e}")
+
+            print(
+                f"❌ BOT LOOP ERROR: {e}"
+            )
+
             time.sleep(60)
 
 
 # =========================================================
-# LAZY INITIALIZATION 
+# START BOT SAFELY
 # =========================================================
 
-@app.before_request
-def start_background_bot_safely():
-    global bg_started
-    if not bg_started:
-        with bg_lock:
-            if not bg_started:
-                print("🎬 [Flask Init] ตรวจพบเว็บทราฟฟิกแรก เริ่มต้น Thread บอทข่าวในกระบวนการที่เสถียร...")
-                bot_thread = Thread(target=bot_loop, daemon=True)
-                bot_thread.start()
-                bg_started = True
+def start_bot():
+
+    global bot_started
+
+    with bot_lock:
+
+        if bot_started:
+            return
+
+        print(
+            "🎬 กำลังเริ่ม Background Bot..."
+        )
+
+        thread = Thread(
+            target=bot_loop,
+            daemon=True
+        )
+
+        thread.start()
+
+        bot_started = True
+
+
+# เริ่มทันทีเมื่อ Python process ทำงาน
+start_bot()
 
 
 # =========================================================
@@ -502,8 +979,17 @@ def start_background_bot_safely():
 # =========================================================
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "8080"
+        )
+    )
+
     app.run(
         host="0.0.0.0",
         port=port,
+        threaded=True,
+        use_reloader=False,
     )
