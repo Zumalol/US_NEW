@@ -84,11 +84,15 @@ TARGET_KEYWORDS = [
 
 
 # =========================================================
-# GLOBAL VARIABLES
+# GLOBAL VARIABLES & LOCKS
 # =========================================================
 
 seen_news = set()
 seen_news_lock = Lock()
+
+# ตัวแปรควบคุมไม่ให้ Thread ทำงานซ้อนกันหลายตัว
+bg_started = False
+bg_lock = Lock()
 
 app = Flask(__name__)
 
@@ -136,7 +140,6 @@ def validate_environment():
         print("⚠️ Environment Variables ที่ยังไม่มี:")
         for item in missing:
             print(f"   - {item}")
-
         return False
 
     print("✅ Environment Variables พร้อมใช้งาน")
@@ -190,20 +193,15 @@ def fetch_latest_news():
                     f"{getattr(feed, 'bozo_exception', 'Unknown')}"
                 )
 
-            print(
-                f"📥 พบ {len(feed.entries)} ข่าว "
-                f"จาก RSS นี้"
-            )
-
+            print(f"📥 พบ {len(feed.entries)} ข่าวจาก RSS นี้")
             all_entries.extend(feed.entries)
 
         except Exception as e:
             print(f"❌ Error fetching RSS: {e}")
 
     # -----------------------------------------------------
-    # ตัดข่าวซ้ำ
+    # ตัดข่าวซ้ำระหว่าง Feed ต่างๆ
     # -----------------------------------------------------
-
     unique_entries = []
     unique_keys = set()
 
@@ -217,11 +215,7 @@ def fetch_latest_news():
             unique_keys.add(key)
             unique_entries.append(entry)
 
-    print(
-        f"📰 ข่าวทั้งหมดหลังตัดข่าวซ้ำ: "
-        f"{len(unique_entries)} ข่าว"
-    )
-
+    print(f"📰 รวมข่าวทั้งหมดหลังตัดข่าวซ้ำ: {len(unique_entries)} ข่าว")
     return unique_entries
 
 
@@ -285,10 +279,7 @@ def summarize_with_groq(news_title, news_description, news_source=""):
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a professional macroeconomic "
-                    "and gold market analyst."
-                ),
+                "content": "You are a professional macroeconomic and gold market analyst.",
             },
             {
                 "role": "user",
@@ -309,22 +300,10 @@ def summarize_with_groq(news_title, news_description, news_source=""):
 
         if response.status_code == 200:
             data = response.json()
-            return (
-                data["choices"][0]
-                ["message"]
-                ["content"]
-                .strip()
-            )
+            return data["choices"][0]["message"]["content"].strip()
 
-        print(
-            f"❌ Groq HTTP {response.status_code}: "
-            f"{response.text}"
-        )
-
-        return (
-            f"❌ Groq Error "
-            f"HTTP {response.status_code}"
-        )
+        print(f"❌ Groq HTTP {response.status_code}: {response.text}")
+        return f"❌ Groq Error HTTP {response.status_code}"
 
     except Exception as e:
         print(f"❌ ไม่สามารถเชื่อมต่อ Groq: {e}")
@@ -337,16 +316,10 @@ def summarize_with_groq(news_title, news_description, news_source=""):
 
 def send_telegram_message(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(
-            "❌ ไม่มี TELEGRAM_TOKEN "
-            "หรือ TELEGRAM_CHAT_ID"
-        )
+        print("❌ ไม่มี TELEGRAM_TOKEN หรือ TELEGRAM_CHAT_ID")
         return False
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendMessage"
-    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
     if len(text) > 4000:
         text = text[:4000] + "\n\n...ข้อความถูกตัด"
@@ -359,33 +332,20 @@ def send_telegram_message(text):
     }
 
     try:
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=20,
-        )
-
-        print(
-            f"📡 Telegram HTTP: "
-            f"{response.status_code}"
-        )
-
+        response = requests.post(url, json=payload, timeout=20)
+        print(f"📡 Telegram HTTP: {response.status_code}")
+        
         if response.status_code != 200:
-            print(
-                f"❌ Telegram Error: "
-                f"{response.text}"
-            )
+            print(f"❌ Telegram Error: {response.text}")
             return False
-
         return True
-
     except Exception as e:
         print(f"❌ Error ตอนส่ง Telegram: {e}")
         return False
 
 
 # =========================================================
-# ดึงชื่อ Source
+# ดึงชื่อ Source ข่าว
 # =========================================================
 
 def get_news_source(entry):
@@ -403,11 +363,7 @@ def get_news_source(entry):
 # =========================================================
 
 def initialize_seen_news():
-    print(
-        "🔄 กำลังโหลดข่าวเก่า "
-        "เพื่อป้องกันการส่งข่าวย้อนหลัง..."
-    )
-
+    print("🔄 กำลังโหลดข่าวเก่าจากทุกแหล่งข่าวเพื่อป้องกันการส่งข่าวย้อนหลัง...")
     entries = fetch_latest_news()
 
     with seen_news_lock:
@@ -416,47 +372,36 @@ def initialize_seen_news():
             if link:
                 seen_news.add(link)
 
-    print(
-        f"✅ บันทึกข่าวเก่าแล้ว "
-        f"{len(seen_news)} ข่าว"
-    )
+    print(f"✅ บันทึกประวัติข่าวเก่าเรียบร้อยแล้วทั้งหมด {len(seen_news)} ข่าว")
 
 
 # =========================================================
-# BOT LOOP
+# BOT MAIN LOOP
 # =========================================================
 
 def bot_loop():
-    print(
-        "🚀 [Background] "
-        "Gold News Bot เริ่มทำงาน..."
-    )
-
+    print("🚀 [Background] Gold News Bot เริ่มรันลูปเต็มรูปแบบ...")
     validate_environment()
-
-    # ป้องกันการยิงข่าวเก่าทั้งหมดตอนเปิดบอท
+    
+    # ดึงข้อมูลจากทุกฟีดมาเก็บเป็นประวัติเริ่มต้นป้องกันสแปมข่าวเก่า
     initialize_seen_news()
 
     print("📲 ส่งข้อความแจ้งเปิดบอท...")
     send_telegram_message(
-        "✅ <b>Gold News Bot เริ่มทำงานแล้ว!</b>\n\n"
-        "🥇 Gold / XAUUSD\n"
-        "🏦 Fed / FOMC / Powell\n"
-        "🇺🇸 Trump\n"
-        "💵 USD / Interest Rates\n\n"
+        "✅ <b>Gold News Bot V2 ออนไลน์แล้ว!</b>\n\n"
+        "🥇 รันระบบตรวจสอบข่าวสาร 4 แหล่งข้อมูล:\n"
+        "1. Trump & Fed Monitor\n"
+        "2. Interest Rates & FOMC Update\n"
+        "3. Gold & XAUUSD Tracker\n"
+        "4. Trade War & Tariffs Economic Impact\n\n"
         "🤖 ระบบกำลังตรวจสอบข่าวอัตโนมัติ 24/7"
     )
 
     while True:
         try:
-            print(
-                f"\n🔄 ตรวจสอบข่าวเวลา "
-                f"{time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
+            print(f"\n🔄 ตรวจสอบข่าวเวลา {time.strftime('%Y-%m-%d %H:%M:%S')}")
             entries = fetch_latest_news()
 
-            # reversed เพื่อส่งข่าวเก่าก่อนข่าวใหม่
             for entry in reversed(entries):
                 title = entry.get("title", "ไม่มีหัวข้อ")
                 description = entry.get("description", "")
@@ -465,18 +410,12 @@ def bot_loop():
 
                 news_id = link if link else title.lower().strip()
 
-                # -----------------------------
-                # ตรวจสอบว่าเคยส่งหรือยัง
-                # -----------------------------
                 with seen_news_lock:
                     already_seen = (news_id in seen_news)
 
                 if already_seen:
                     continue
 
-                # -----------------------------
-                # กรองข่าว
-                # -----------------------------
                 if not is_relevant_news(title, description):
                     with seen_news_lock:
                         seen_news.add(news_id)
@@ -485,41 +424,26 @@ def bot_loop():
                 print(f"\n📰 พบข่าวใหม่: {title}")
                 print(f"🏢 Source: {source}")
 
-                # -----------------------------
-                # วิเคราะห์ด้วย AI
-                # -----------------------------
                 summary = summarize_with_groq(title, description, source)
 
-                # -----------------------------
-                # Escape HTML กันโครงสร้างพัง
-                # -----------------------------
+                # ทำความสะอาดข้อความป้องกันแท็กแปลกปลอมทำ HTML พัง
                 safe_title = html.escape(title)
                 safe_source = html.escape(source)
                 safe_summary = html.escape(summary)
                 safe_link = html.escape(link, quote=True)
 
-                # -----------------------------
-                # สร้างข้อความ Telegram
-                # -----------------------------
                 message = (
                     "🚨 <b>GOLD MARKET UPDATE</b>\n\n"
-                    f"📰 <b>หัวข้อ:</b>\n"
-                    f"{safe_title}\n\n"
-                    f"🏢 <b>แหล่งข่าว:</b> "
-                    f"{safe_source}\n\n"
-                    f"🤖 <b>AI วิเคราะห์:</b>\n"
-                    f"{safe_summary}\n\n"
+                    f"📰 <b>หัวข้อ:</b>\n{safe_title}\n\n"
+                    f"🏢 <b>แหล่งข่าว:</b> {safe_source}\n\n"
+                    f"🤖 <b>AI วิเคราะห์:</b>\n{safe_summary}\n\n"
                 )
 
                 if link:
                     message += f"🔗 <a href=\"{safe_link}\">อ่านข่าวต้นฉบับ</a>"
 
-                # -----------------------------
-                # ส่ง Telegram
-                # -----------------------------
                 success = send_telegram_message(message)
 
-                # Mark seen เฉพาะเมื่อส่งสำเร็จ
                 if success:
                     with seen_news_lock:
                         seen_news.add(news_id)
@@ -527,13 +451,9 @@ def bot_loop():
                 else:
                     print("⚠️ ส่งไม่สำเร็จ จะลองใหม่รอบถัดไป")
 
-                # ป้องกัน API Rate Limit
                 time.sleep(3)
 
-            print(
-                f"😴 รอ {CHECK_INTERVAL} วินาที "
-                "ก่อนตรวจสอบรอบใหม่..."
-            )
+            print(f"😴 รอ {CHECK_INTERVAL} วินาที ก่อนตรวจสอบรอบใหม่...")
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
@@ -542,15 +462,26 @@ def bot_loop():
 
 
 # =========================================================
-# START BACKGROUND BOT (ย้ายออกนอก __main__ เพื่อรองรับ Render/Gunicorn)
+# LAZY INITIALIZATION (เทคนิคแก้ปัญหา Gunicorn/Render Lifecycle)
 # =========================================================
-bot_thread = Thread(target=bot_loop, daemon=True)
-bot_thread.start()
+
+@app.before_request
+def start_background_bot_safely():
+    """ฟังก์ชันนี้จะทำงานครั้งแรกและครั้งเดียวเมื่อมี Request หรือ Ping แรกวิ่งเข้าหาเว็บบอร์ด"""
+    global bg_started
+    if not bg_started:
+        with bg_lock:
+            if not bg_started:
+                print("🎬 [Flask Init] ตรวจพบการเรียกใช้งานหน้าเว็บครั้งแรก กำลังเริ่มต้น Background Bot ภายในกระบวนการหลัก...")
+                bot_thread = Thread(target=bot_loop, daemon=True)
+                bot_thread.start()
+                bg_started = True
 
 
 # =========================================================
 # LOCAL RUN
 # =========================================================
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     app.run(
