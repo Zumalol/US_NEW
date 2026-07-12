@@ -33,43 +33,17 @@ GROQ_MODEL = os.getenv(
 )
 
 # =========================================================
-# SEARCH QUERIES & PREMIUM RELIABLE RSS FEEDS
+# DIRECT PREMIUM FINANCIAL FEEDS (ตัด Google News ออกทั้งหมด)
 # =========================================================
 
-SEARCH_QUERIES = [
-    "Donald Trump Federal Reserve",
-    "Trump Powell Fed",
-    "Federal Reserve interest rates",
-    "FOMC Powell",
-    "Gold Federal Reserve",
-    "Gold XAUUSD Fed",
-    "US CPI inflation Fed",
-    "Trump tariffs gold dollar",
-]
-
-RSS_FEED_URLS = []
-
-# 1. แหล่งข่าวเจาะจงรายประเด็นจาก Google News (จะเข้า Proxy อัตโนมัติเมื่อดึงข้อมูลเพื่อแก้ 503)
-for query in SEARCH_QUERIES:
-    url = (
-        "https://news.google.com/rss/search?"
-        f"q={quote_plus(query)}"
-        "&hl=en-US"
-        "&gl=US"
-        "&ceid=US:en"
-    )
-    RSS_FEED_URLS.append(url)
-
-# 2. เพิ่มคัดสรรแหล่งข่าวการเงิน สถิติเศรษฐกิจ และทองคำระดับโลกที่มีความน่าเชื่อถือสูงโดยตรง
-PREMIUM_FEEDS = [
-    "https://www.fxstreet.com/rss/news",                          # FXStreet (ข้อมูลทองคำ XAUUSD และการเงินเชิงลึก)
+# คัดสรรเฉพาะสำนักข่าวการเงินชั้นนำระดับโลก ที่ให้ลิงก์ตรงและเปิดให้อ่านเนื้อหาหลักได้จริง
+RSS_FEED_URLS = [
+    "https://www.fxstreet.com/rss/news",                          # FXStreet (วิเคราะห์เชิงลึกทองคำ XAUUSD และตลาด Forex)
     "https://feeds.content.dowjones.io/public/rss/mw_topstories",    # MarketWatch (ข่าวสารตลาดทุนสหรัฐฯ และนโยบายเศรษฐกิจ)
-    "https://www.cnbc.com/id/20910258/device/rss/rss.html",        # CNBC Economy (ข่าวด้านธนาคารกลาง Fed และ Macroeconomics)
-    "https://www.cnbc.com/id/15839069/device/rss/rss.html",        # CNBC Investing (ข่าววิเคราะห์ทิศทางทองคำ ตลาดเงิน ตลาดทุน)
-    "https://finance.yahoo.com/news/rssindex",                     # Yahoo Finance (สรุปสถานการณ์ความเคลื่อนไหวเศรษฐกิจโลก)
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",        # CNBC Economy (ข่าวด้านธนาคารกลาง Fed, ดอกเบี้ย และเงินเฟ้อ)
+    "https://www.cnbc.com/id/15839069/device/rss/rss.html",        # CNBC Investing (ข่าววิเคราะห์ทิศทางทองคำ และสินค้าโภคภัณฑ์)
+    "https://finance.yahoo.com/news/rssindex"                      # Yahoo Finance (สรุปภาพรวมข่าวเด่นเศรษฐกิจมหภาค)
 ]
-
-RSS_FEED_URLS.extend(PREMIUM_FEEDS)
 
 # =========================================================
 # KEYWORDS
@@ -153,8 +127,8 @@ def now_text():
 @app.route("/")
 def home():
     return """
-    <h1>🤖 Gold / Trump / Fed News Bot v2</h1>
-    <p>Bot Status: Active & Anti-503 Layer Enabled</p>
+    <h1>🤖 Verified Premium Financial News Bot</h1>
+    <p>Status: Active (Filtering 100% Direct Premium Feeds)</p>
     <ul>
         <li><a href="/health">/health</a></li>
         <li><a href="/test-news">/test-news</a></li>
@@ -214,47 +188,40 @@ def get_matched_keywords(title, description):
     return matches
 
 # =========================================================
-# FETCH ONE FEED (ระบบ Multi-Layer ป้องกัน Error 503)
+# FETCH ONE FEED (เน้นความเสถียรและดึงตรง)
 # =========================================================
 
 def fetch_one_feed(url):
-    # ใช้ User-Agent ฝั่งอุปกรณ์เคลื่อนที่เพื่อความแนบเนียนและผ่านการคัดกรองง่ายขึ้น
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 "
-            "Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
         ),
         "Accept": "application/rss+xml,application/xml,text/xml,*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
     }
 
-    # หลีกเลี่ยงดึงตรงกับ Google News บนคลาวด์เพื่อข้าม 503 ทันที
-    is_google_news = "news.google.com" in url
-
-    # METHOD 1: ดึงตรง (ใช้กับ Premium Feeds อย่าง CNBC, FXStreet, WSJ)
-    if not is_google_news:
-        try:
-            print("🔄 [Direct] กำลังดึงข้อมูลตรงจากแหล่งข่าวหลัก...")
-            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-            print(f"HTTP {response.status_code} | {len(response.content)} bytes")
-            
-            if response.status_code in [403, 503]:
-                print(f"⚠️ เจอสิทธิ์ระงับ {response.status_code} -> สลับเข้าระบบ Proxy...")
-            else:
-                response.raise_for_status()
-                feed = feedparser.parse(response.content)
-                entries = list(getattr(feed, "entries", []))
-                if entries:
-                    print(f"✅ สำเร็จ (Direct): พบ {len(entries)} ข่าว")
-                    return entries
-        except Exception as e:
-            print(f"⚠️ วิธีดึงตรงติดขัด: {e}")
-
-    # METHOD 2: ดึงผ่าน Proxy หลัก (api.allorigins.win) เพื่อหลบเลี่ยง 503
+    # METHOD 1: ดึงตรงจากสำนักข่าวหลัก (รวดเร็วและได้ลิงก์ดั้งเดิมแน่นอน)
     try:
-        print("📡 [Proxy 1] กำลังดึงผ่านเครือข่าย api.allorigins.win...")
+        print("🔄 [Direct Fetch] กำลังดึงข้อมูลตรงจากสำนักข่าวหลัก...")
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        
+        if response.status_code == 200:
+            feed = feedparser.parse(response.content)
+            entries = list(getattr(feed, "entries", []))
+            if entries:
+                print(f"✅ สำเร็จ (Direct): พบ {len(entries)} ข่าว")
+                return entries
+        else:
+            print(f"⚠️ Direct Fetch ได้รับ HTTP Status: {response.status_code}")
+    except Exception as e:
+        print(f"⚠️ วิธีดึงตรงติดขัด: {e}")
+
+    # METHOD 2: ดึงผ่าน Proxy Fallback (เผื่อกรณี IP ของ Hosting โดนเซิร์ฟเวอร์ปลายทางตรวจสอบ)
+    try:
+        print("📡 [Proxy Fallback] ลองดึงผ่านเครือข่ายสำรองเพื่อความชัวร์...")
         encoded_url = quote_plus(url)
         proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
         response = requests.get(proxy_url, headers=headers, timeout=20)
@@ -263,36 +230,10 @@ def fetch_one_feed(url):
             feed = feedparser.parse(response.content)
             entries = list(getattr(feed, "entries", []))
             if entries:
-                print(f"✅ สำเร็จ (Proxy 1): พบ {len(entries)} ข่าว")
+                print(f"✅ สำเร็จ (Proxy): พบ {len(entries)} ข่าว")
                 return entries
     except Exception as e:
-        print(f"⚠️ Proxy 1 ผิดพลาด: {e}")
-
-    # METHOD 3: ดึงผ่าน Proxy สำรอง (corsproxy.io) 
-    try:
-        print("📡 [Proxy 2] กำลังดึงผ่านเครือข่ายสำรอง corsproxy.io...")
-        proxy_url_2 = f"https://corsproxy.io/?{quote_plus(url)}"
-        response = requests.get(proxy_url_2, headers=headers, timeout=20)
-        
-        if response.status_code == 200:
-            feed = feedparser.parse(response.content)
-            entries = list(getattr(feed, "entries", []))
-            if entries:
-                print(f"✅ สำเร็จ (Proxy 2): พบ {len(entries)} ข่าว")
-                return entries
-    except Exception as e:
-        print(f"⚠️ Proxy 2 ผิดพลาด: {e}")
-
-    # METHOD 4: ทางเลือกสุดท้ายดึงด้วย Feedparser Direct
-    try:
-        print("🔄 [Feedparser] กำลังลองใช้ Feedparser ดึงตรงแบบดั้งเดิม...")
-        feed = feedparser.parse(url)
-        entries = list(getattr(feed, "entries", []))
-        if entries:
-            print(f"✅ สำเร็จ (Feedparser Direct): พบ {len(entries)} ข่าว")
-            return entries
-    except Exception as e:
-        print(f"⚠️ Feedparser Direct ผิดพลาด: {e}")
+        print(f"⚠️ Proxy Fallback ผิดพลาด: {e}")
 
     return []
 
@@ -311,17 +252,14 @@ def fetch_latest_news():
     last_status = "fetching"
     last_error = None
 
-    print("\n")
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print(f"🌍 START FETCH: {last_check_time}")
     print("=" * 70)
 
     all_entries = []
 
     for index, url in enumerate(RSS_FEED_URLS, start=1):
-        print()
-        print(f"🌐 FEED {index}/{len(RSS_FEED_URLS)}")
-        print(url[:120] + "..." if len(url) > 120 else url)
+        print(f"\n🌐 FEED {index}/{len(RSS_FEED_URLS)}: {url}")
 
         try:
             entries = fetch_one_feed(url)
@@ -329,12 +267,9 @@ def fetch_latest_news():
         except Exception as e:
             print(f"❌ FEED ERROR: {e}")
 
-        time.sleep(0.4)
+        time.sleep(0.5)
 
-    # =====================================================
-    # REMOVE DUPLICATES
-    # =====================================================
-
+    # ป้องกันการส่งข่าวซ้ำในรอบเดียวกัน
     unique_entries = []
     cycle_ids = set()
 
@@ -352,16 +287,10 @@ def fetch_latest_news():
 
     last_news_count = len(unique_entries)
     last_check_finished = now_text()
+    last_status = "fetch_success" if unique_entries else "no_news_found"
 
-    if unique_entries:
-        last_status = "fetch_success"
-    else:
-        last_status = "no_news_found"
-
-    print()
-    print("=" * 70)
-    print(f"📦 RAW NEWS: {len(all_entries)}")
-    print(f"📰 UNIQUE NEWS: {len(unique_entries)}")
+    print("\n" + "=" * 70)
+    print(f"📰 UNIQUE PREMIUM NEWS FOUND: {len(unique_entries)}")
     print("=" * 70)
 
     return unique_entries
@@ -371,17 +300,7 @@ def fetch_latest_news():
 # =========================================================
 
 def get_source(entry):
-    try:
-        source = entry.get("source", {})
-        if isinstance(source, dict):
-            title = source.get("title")
-            if title:
-                return clean_text(title)
-    except Exception:
-        pass
-    
-    # พยายามตรวจสอบ Domain จาก Link หากไม่มีข้อมูล Source แนบมาตรงๆ
-    link = entry.get("link", "")
+    link = entry.get("link", "").lower()
     if "fxstreet.com" in link:
         return "FXStreet"
     elif "marketwatch.com" in link:
@@ -390,8 +309,14 @@ def get_source(entry):
         return "CNBC"
     elif "yahoo.com" in link:
         return "Yahoo Finance"
-
-    return "Financial News Source"
+    
+    try:
+        source = entry.get("source", {})
+        if isinstance(source, dict) and source.get("title"):
+            return clean_text(source.get("title"))
+    except Exception:
+        pass
+    return "Premium Financial News"
 
 # =========================================================
 # GROQ
@@ -441,27 +366,17 @@ LOW / MEDIUM / HIGH
 
     payload = {
         "model": GROQ_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
         "max_tokens": 700,
     }
 
     try:
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=60)
-        print(f"🤖 GROQ HTTP {response.status_code}")
-
         if response.status_code == 200:
             data = response.json()
             return data["choices"][0]["message"]["content"].strip()
-
-        print(response.text)
         return f"⚠️ Groq Error HTTP {response.status_code}"
-
     except Exception as e:
         print(f"❌ GROQ ERROR: {e}")
         return "⚠️ AI ไม่สามารถวิเคราะห์ได้ในขณะนี้"
@@ -476,7 +391,6 @@ def send_telegram(text):
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
     if len(text) > 4000:
         text = text[:3950] + "\n\n..."
 
@@ -484,22 +398,18 @@ def send_telegram(text):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True,
+        "disable_web_page_preview": False,  # เปิดไว้เพื่อให้แสดงพรีวิวหน้าเว็บของข่าวจริง
     }
 
     try:
         response = requests.post(url, json=payload, timeout=30)
-        print(f"📨 TELEGRAM HTTP {response.status_code}")
-        if response.status_code != 200:
-            print(response.text)
-            return False
-        return True
+        return response.status_code == 200
     except Exception as e:
         print(f"❌ TELEGRAM ERROR: {e}")
         return False
 
 # =========================================================
-# PROCESS NEWS
+# PROCESS NEWS (คัดกรองลิงก์ที่เข้าอ่านได้จริงเท่านั้น)
 # =========================================================
 
 def process_news(entries):
@@ -515,10 +425,11 @@ def process_news(entries):
 
         title = clean_text(entry.get("title", ""))
         description = clean_text(entry.get("summary", entry.get("description", "")))
-        link = entry.get("link", "")
+        link = entry.get("link", "").strip()
         source = get_source(entry)
 
-        if not title:
+        # ตรวจสอบ: ต้องมีหัวข้อข่าว และลิงก์ต้องเริ่มต้นด้วย http เท่านั้น (คัดกรองลิงก์ขยะ/ลิงก์เสีย)
+        if not title or not link or not link.startswith("http"):
             continue
 
         news_id = create_news_id(title)
@@ -532,10 +443,7 @@ def process_news(entries):
             continue
 
         relevant_count += 1
-
-        print()
-        print(f"🎯 RELEVANT: {title}")
-        print(f"🔑 MATCH: {', '.join(matches[:8])}")
+        print(f"\n🎯 MATCHED PREMIUM NEWS: {title}")
 
         analysis = analyze_with_groq(title, description, source)
 
@@ -549,10 +457,8 @@ def process_news(entries):
             f"📰 <b>{safe_title}</b>\n\n"
             f"🏢 <b>Source:</b> {safe_source}\n\n"
             f"🤖 <b>AI Analysis:</b>\n{safe_analysis}\n\n"
+            f"🔗 <a href=\"{safe_link}\">คลิกอ่านข่าวฉบับเต็ม</a>"
         )
-
-        if link:
-            message += f"🔗 <a href=\"{safe_link}\">อ่านข่าว</a>"
 
         success = send_telegram(message)
 
@@ -561,13 +467,12 @@ def process_news(entries):
                 seen_news.add(news_id)
             sent_this_cycle += 1
             total_sent += 1
-            print("✅ SENT")
+            print("✅ SENT TO TELEGRAM")
 
         time.sleep(2)
 
     last_relevant_count = relevant_count
-    print(f"🎯 RELEVANT NEWS: {relevant_count}")
-    print(f"📨 SENT THIS CYCLE: {sent_this_cycle}")
+    print(f"\n📊 Cycle Summary -> Matches: {relevant_count} | Sent: {sent_this_cycle}")
     return sent_this_cycle
 
 # =========================================================
@@ -589,12 +494,11 @@ def run_news_cycle():
 
     try:
         total_cycles += 1
-        print()
-        print(f"🚀 NEWS CYCLE #{total_cycles}")
+        print(f"\n🚀 STARTING NEWS CYCLE #{total_cycles}")
 
         entries = fetch_latest_news()
         if not entries:
-            print("❌ ไม่พบข่าวจากทุก Feed")
+            print("❌ ไม่พบข่าวจาก Premium Feeds ในรอบนี้")
             last_status = "no_news_found"
             return
 
@@ -615,8 +519,7 @@ def run_news_cycle():
 # =========================================================
 
 def bot_loop():
-    print()
-    print("🚀 BACKGROUND BOT LOOP STARTED")
+    print("\n🚀 BACKGROUND BOT LOOP STARTED")
     time.sleep(3)
 
     while True:
@@ -625,11 +528,11 @@ def bot_loop():
         except Exception:
             traceback.print_exc()
 
-        print(f"😴 WAIT {CHECK_INTERVAL} SECONDS")
+        print(f"😴 WAIT {CHECK_INTERVAL} SECONDS FOR NEXT CYCLE")
         time.sleep(CHECK_INTERVAL)
 
 # =========================================================
-# TEST NEWS ENDPOINT
+# ENDPOINTS
 # =========================================================
 
 @app.route("/test-news")
@@ -642,53 +545,38 @@ def test_news():
             title = clean_text(entry.get("title", ""))
             description = clean_text(entry.get("summary", entry.get("description", "")))
             matches = get_matched_keywords(title, description)
+            link = entry.get("link", "")
 
-            result.append({
-                "title": title,
-                "source": get_source(entry),
-                "matched_keywords": matches,
-            })
+            if link.startswith("http"):
+                result.append({
+                    "title": title,
+                    "source": get_source(entry),
+                    "link": link,
+                    "matched_keywords": matches,
+                })
 
         return jsonify({
             "success": True,
-            "count": len(entries),
+            "count": len(result),
             "news": result,
         })
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-        }), 500
-
-# =========================================================
-# RUN NOW ENDPOINT
-# =========================================================
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/run-now")
 def run_now():
     if bot_running:
-        return jsonify({
-            "success": False,
-            "message": "Bot cycle already running",
-        })
+        return jsonify({"success": False, "message": "Bot cycle already running"})
 
     thread = Thread(target=run_news_cycle, daemon=True)
     thread.start()
-    return jsonify({
-        "success": True,
-        "message": "News cycle started",
-    })
-
-# =========================================================
-# START BACKGROUND BOT
-# =========================================================
+    return jsonify({"success": True, "message": "Premium news cycle started manually"})
 
 def start_background_bot():
     global bot_started
     with bot_start_lock:
         if bot_started:
             return
-
         print("🎬 STARTING BACKGROUND BOT")
         thread = Thread(target=bot_loop, daemon=True)
         thread.start()
@@ -696,16 +584,7 @@ def start_background_bot():
 
 start_background_bot()
 
-# =========================================================
-# MAIN
-# =========================================================
-
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     print(f"🌐 STARTING FLASK ON PORT {port}")
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        threaded=True,
-        use_reloader=False,
-    )
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
