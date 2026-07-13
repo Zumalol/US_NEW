@@ -4,7 +4,7 @@ import time
 import html
 import hashlib
 import traceback
-from datetime import datetime, timezone, timedelta  # สำหรับคำนวณเวลาย้อนหลัง 1 วัน
+from datetime import datetime, timezone, timedelta  # สำหรับจัดการเขตเวลาประเทศไทย (GMT+7)
 from threading import Thread, Lock
 from urllib.parse import quote_plus
 
@@ -33,89 +33,45 @@ GROQ_MODEL = os.getenv(
 )
 
 # =========================================================
-# DIRECT PREMIUM FINANCIAL FEEDS (ตัด Google News ออกทั้งหมด)
+# DIRECT PREMIUM FINANCIAL FEEDS
 # =========================================================
 
 RSS_FEED_URLS = [
-    "https://www.fxstreet.com/rss/news",                          # FXStreet (วิเคราะห์เชิงลึกทองคำ XAUUSD และตลาด Forex)
-    "https://feeds.content.dowjones.io/public/rss/mw_topstories",    # MarketWatch (ข่าวสารตลาดทุนสหรัฐฯ และนโยบายเศรษฐกิจ)
-    "https://www.cnbc.com/id/20910258/device/rss/rss.html",        # CNBC Economy (ข่าวด้านธนาคารกลาง Fed, ดอกเบี้ย และเงินเฟ้อ)
-    "https://www.cnbc.com/id/15839069/device/rss/rss.html",        # CNBC Investing (ข่าววิเคราะห์ทิศทางทองคำ และสินค้าโภคภัณฑ์)
-    "https://finance.yahoo.com/news/rssindex"                      # Yahoo Finance (สรุปภาพรวมข่าวเด่นเศรษฐกิจมหภาค)
+    "https://www.fxstreet.com/rss/news",                          # FXStreet
+    "https://feeds.content.dowjones.io/public/rss/mw_topstories",    # MarketWatch
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",        # CNBC Economy
+    "https://www.cnbc.com/id/15839069/device/rss/rss.html",        # CNBC Investing
+    "https://finance.yahoo.com/news/rssindex"                      # Yahoo Finance
 ]
 
 # =========================================================
-# KEYWORDS (เพิ่มหมวดหมู่ข่าวสงครามและอิหร่าน)
+# KEYWORDS (รวมข่าวเศรษฐกิจและสงครามอิหร่าน)
 # =========================================================
 
 TARGET_KEYWORDS = [
-    # ตลาดทองคำ
-    "gold",
-    "xau",
-    "xauusd",
-    "bullion",
-
-    # การเมืองสหรัฐฯ
-    "trump",
-    "donald trump",
-
-    # ธนาคารกลาง & นโยบายการเงิน
-    "fed",
-    "fomc",
-    "federal reserve",
-    "powell",
-    "jerome powell",
-    "interest rate",
-    "rate cut",
-    "rate hike",
-    "monetary policy",
-
-    # ตัวเลขเศรษฐกิจ
-    "inflation",
-    "cpi",
-    "pce",
-    "nfp",
-    "nonfarm",
-    "jobs report",
-    "unemployment",
-
-    # ค่าเงิน & ผลตอบแทนพันธบัตร
-    "dollar",
-    "usd",
-    "treasury",
-    "bond yield",
-
-    # สงครามการค้า
-    "tariff",
-    "tariffs",
-    "trade war",
-
-    # 🚨 ข่าวสงครามความขัดแย้ง และอิหร่าน (Geopolitical Risks & Iran)
-    "iran",
-    "iranian",
-    "tehran",
-    "war",
-    "military",
-    "missile",
-    "strike",
-    "middle east",
-    "escalation",
-    "retaliation",
-    "attack",
-    "geopolitical"
+    "gold", "xau", "xauusd", "bullion",
+    "trump", "donald trump",
+    "fed", "fomc", "federal reserve", "powell", "jerome powell",
+    "interest rate", "rate cut", "rate hike", "monetary policy",
+    "inflation", "cpi", "pce", "nfp", "nonfarm", "jobs report", "unemployment",
+    "dollar", "usd", "treasury", "bond yield",
+    "tariff", "tariffs", "trade war",
+    # 🚨 หมวดสงครามและอิหร่าน
+    "iran", "iranian", "tehran", "war", "military", "missile", "strike", 
+    "middle east", "escalation", "retaliation", "attack", "geopolitical"
 ]
 
 # =========================================================
-# GLOBAL STATE
+# GLOBAL STATE & LOCKS
 # =========================================================
 
 app = Flask(__name__)
 
-seen_news = set()
+seen_news = set()          # เก็บรหัสข่าวสารที่ส่งไปแล้วเพื่อไม่ให้ส่งซ้ำ
 seen_lock = Lock()
+current_bot_date = None    # ใช้บันทึกวันที่ปัจจุบันของบอทเพื่อเคลียร์หน่วยความจำตอนขึ้นวันใหม่
 
 bot_start_lock = Lock()
-
 bot_started = False
 bot_running = False
 
@@ -129,14 +85,11 @@ last_status = "waiting"
 total_cycles = 0
 total_sent = 0
 
-# =========================================================
-# TIME
-# =========================================================
+# กำหนดเวลาประเทศไทย (GMT+7)
+TZ_THAILAND = timezone(timedelta(hours=7))
 
 def now_text():
-    return datetime.now(
-        timezone.utc
-    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(TZ_THAILAND).strftime("%Y-%m-%d %H:%M:%S GMT+7")
 
 # =========================================================
 # ROUTES
@@ -146,7 +99,7 @@ def now_text():
 def home():
     return """
     <h1>🤖 Verified Premium Financial News Bot</h1>
-    <p>Status: Active (Filtering 100% Direct Premium Feeds | Past 24 Hours Only)</p>
+    <p>Status: Active (Filtering 100% Direct Premium Feeds | Strict Today Only)</p>
     <ul>
         <li><a href="/health">/health</a></li>
         <li><a href="/test-news">/test-news</a></li>
@@ -174,7 +127,7 @@ def health():
     })
 
 # =========================================================
-# CLEAN TEXT
+# UTILITIES
 # =========================================================
 
 def clean_text(value):
@@ -185,17 +138,9 @@ def clean_text(value):
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
-# =========================================================
-# NEWS ID
-# =========================================================
-
 def create_news_id(title):
     normalized = re.sub(r"\s+", " ", title.lower().strip())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-# =========================================================
-# FILTER
-# =========================================================
 
 def get_matched_keywords(title, description):
     text = f"{title} {description}".lower()
@@ -222,7 +167,6 @@ def fetch_one_feed(url):
     }
 
     try:
-        print("🔄 [Direct Fetch] กำลังดึงข้อมูลตรงจากสำนักข่าวหลัก...")
         response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
         if response.status_code == 200:
             feed = feedparser.parse(response.content)
@@ -233,7 +177,6 @@ def fetch_one_feed(url):
         print(f"⚠️ วิธีดึงตรงติดขัด: {e}")
 
     try:
-        print("📡 [Proxy Fallback] ลองดึงผ่านเครือข่ายสำรอง...")
         encoded_url = quote_plus(url)
         proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
         response = requests.get(proxy_url, headers=headers, timeout=20)
@@ -248,18 +191,30 @@ def fetch_one_feed(url):
     return []
 
 # =========================================================
-# FETCH ALL NEWS (กรองเวลา 1 วันล่าสุด)
+# FETCH ALL NEWS (กรองเอาเฉพาะข่าววันนี้ตามเวลาไทย)
 # =========================================================
 
 def fetch_latest_news():
     global last_check_time, last_check_finished, last_news_count, last_error, last_status
+    global seen_news, current_bot_date
 
     last_check_time = now_text()
     last_status = "fetching"
     last_error = None
 
+    # ดึงวันที่ปัจจุบันของประเทศไทย (GMT+7)
+    now_th = datetime.now(TZ_THAILAND)
+    today_th = now_th.date()
+
+    # ระบบเคลียร์ความจำเมื่อขึ้นวันใหม่ ป้องกัน RAM เต็มและช่วยเคลียร์คิวข่าวเก่าออกไป
+    with seen_lock:
+        if current_bot_date != today_th:
+            print(f"📅 เปลี่ยนวันใหม่เป็น {today_th}: ล้างประวัติการส่งซ้ำเพื่อเริ่มวันใหม่")
+            seen_news.clear()
+            current_bot_date = today_th
+
     print("\n" + "=" * 70)
-    print(f"🌍 START FETCH: {last_check_time}")
+    print(f"🌍 START FETCH: {last_check_time} (วันที่ตรวจจับ: {today_th})")
     print("=" * 70)
 
     all_entries = []
@@ -270,27 +225,31 @@ def fetch_latest_news():
             all_entries.extend(entries)
         except Exception as e:
             print(f"❌ FEED ERROR: {e}")
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     unique_entries = []
     cycle_ids = set()
     
-    now_dt = datetime.now(timezone.utc)
-    one_day_ago = now_dt - timedelta(days=1)  # กรองย้อนหลัง 24 ชั่วโมง เท่านั้น
-
     for entry in all_entries:
         title = clean_text(entry.get("title", ""))
         if not title:
             continue
 
+        # --- ⏱️ กระบวนการคัดเลือกเฉพาะข่าวสารที่เกิดใน "วันนี้" เท่านั้น ---
         pub_parsed = entry.get("published_parsed")
         if pub_parsed:
             try:
-                pub_dt = datetime(*pub_parsed[:6], tzinfo=timezone.utc)
-                if pub_dt < one_day_ago:
-                    continue  # เก่ากว่า 1 วัน คัดทิ้งทันที
+                # แปลงเวลาสากลจากผู้ให้บริการ RSS
+                pub_dt_utc = datetime(*pub_parsed[:6], tzinfo=timezone.utc)
+                # ปรับให้เป็นเวลาประเทศไทย
+                pub_dt_th = pub_dt_utc.astimezone(TZ_THAILAND)
+                
+                # หากไม่ใช่วันนี้ (เช่น เป็นข่าวเมื่อวาน) คัดทิ้งทันที
+                if pub_dt_th.date() != today_th:
+                    continue
             except Exception as time_err:
-                print(f"⚠️ ไม่สามารถแปลงเวลาข่าวได้: {time_err}")
+                print(f"⚠️ ไม่สามารถแปลงเวลาข่าวได้ ข้ามไปก่อน: {time_err}")
+                continue
 
         news_id = create_news_id(title)
         if news_id in cycle_ids:
@@ -303,7 +262,7 @@ def fetch_latest_news():
     last_check_finished = now_text()
     last_status = "fetch_success" if unique_entries else "no_news_found"
 
-    print(f"📰 UNIQUE NEWS FOUND (PAST 24H): {len(unique_entries)}")
+    print(f"📰 UNIQUE NEWS FOUND (STRICT TODAY): {len(unique_entries)}")
     return unique_entries
 
 # =========================================================
@@ -330,7 +289,7 @@ def get_source(entry):
     return "Premium Financial News"
 
 # =========================================================
-# GROQ AI ANALYZE
+# GROQ AI ANALYZE (ใช้ Prompt ตัวเต็มแบบมืออาชีพ)
 # =========================================================
 
 def analyze_with_groq(title, description, source):
@@ -400,8 +359,8 @@ def analyze_with_groq(title, description, source):
     payload = {
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": 700,
+        "temperature": 0.1,  # ลด Temp เพื่อลดการมโนและเน้นข้อเท็จจริงมากขึ้น
+        "max_tokens": 800,
     }
 
     try:
@@ -442,7 +401,7 @@ def send_telegram(text):
         return False
 
 # =========================================================
-# PROCESS NEWS
+# PROCESS NEWS (ระบบป้องกันข่าวซ้ำแบบ Realtime)
 # =========================================================
 
 def process_news(entries):
@@ -462,17 +421,18 @@ def process_news(entries):
         if not title or not link or not link.startswith("http"):
             continue
 
+        # 🔒 ตรวจสอบการส่งซ้ำแบบ Thread-safe 
         news_id = create_news_id(title)
         with seen_lock:
             if news_id in seen_news:
-                continue  # ข้ามข่าวที่ส่งไปแล้วป้องกันการส่งซ้ำ
+                continue  # ถ้าพบ ID ในระบบบันทึกความจำแล้ว ให้ข้ามทันทีไม่มีส่งซ้ำ[cite: 5]
 
         matches = get_matched_keywords(title, description)
         if not matches:
             continue
 
         relevant_count += 1
-        print(f"🎯 MATCHED NEWS: {title}")
+        print(f"🎯 MATCHED TODAY NEWS: {title}")
 
         analysis = analyze_with_groq(title, description, source)
 
@@ -482,20 +442,20 @@ def process_news(entries):
         safe_link = html.escape(link, quote=True)
 
         message = (
-            "🚨 <b>GOLD & GEOPOLITICAL NEWS</b>\n\n"
+            "🚨 <b>GOLD & GEOPOLITICAL ANALYSIS</b>\n\n"
             f"📰 <b>{safe_title}</b>\n\n"
             f"🏢 <b>Source:</b> {safe_source}\n\n"
-            f"🤖 <b>AI Analysis:</b>\n{safe_analysis}\n\n"
+            f"{safe_analysis}\n\n"
             f"🔗 <a href=\"{safe_link}\">คลิกอ่านข่าวฉบับเต็ม</a>"
         )
 
         success = send_telegram(message)
         if success:
             with seen_lock:
-                seen_news.add(news_id)
+                seen_news.add(news_id)  # บันทึกสถานะว่าส่งสำเร็จแล้ว ป้องกันลูปถัดไปส่งซ้ำ[cite: 5]
             sent_this_cycle += 1
             total_sent += 1
-            print("✅ SENT TO TELEGRAM")
+            print("✅ SENT TO TELEGRAM SUCCESS")
         time.sleep(2)
 
     last_relevant_count = relevant_count
@@ -521,7 +481,7 @@ def run_news_cycle():
 
         entries = fetch_latest_news()
         if not entries:
-            print("❌ ไม่พบข่าวสดใหม่ตรงเงื่อนไขในรอบนี้")
+            print("❌ ไม่พบข่าวสดใหม่ตรงเงื่อนไขของวันนี้")
             last_status = "no_news_found"
             return
 
@@ -534,15 +494,15 @@ def run_news_cycle():
         print("❌ CYCLE ERROR")
         traceback.print_exc()
     finally:
-        bot_running = False  # คลายล็อกเพื่อให้รอบถัดไปทำงานได้เสมอ
+        bot_running = False
 
 # =========================================================
-# BACKGROUND LOOP (ระบบรันออโตเมติกวนลูป)
+# BACKGROUND LOOP (ระบบออโตเมติกรันอัตโนมัติเบื้องหลัง)
 # =========================================================
 
 def bot_loop():
     print("\n🚀 BACKGROUND BOT LOOP STARTED")
-    time.sleep(5)  # รอระบบ Flask เริ่มทำงานให้สมบูรณ์
+    time.sleep(5)
 
     while True:
         try:
