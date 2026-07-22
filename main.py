@@ -4,7 +4,8 @@ import time
 import html
 import hashlib
 import traceback
-from datetime import datetime, timezone, timedelta  # สำหรับจัดการเขตเวลาประเทศไทย (GMT+7)
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from threading import Thread, Lock
 from urllib.parse import quote_plus
 
@@ -45,7 +46,7 @@ RSS_FEED_URLS = [
 ]
 
 # =========================================================
-# KEYWORDS (รวมข่าวเศรษฐกิจและสงครามอิหร่าน)
+# KEYWORDS (เน้นข่าวเศรษฐกิจระดับสูงและภูมิรัฐศาสตร์)
 # =========================================================
 
 TARGET_KEYWORDS = [
@@ -56,7 +57,7 @@ TARGET_KEYWORDS = [
     "inflation", "cpi", "pce", "nfp", "nonfarm", "jobs report", "unemployment",
     "dollar", "usd", "treasury", "bond yield",
     "tariff", "tariffs", "trade war",
-    # 🚨 หมวดสงครามและอิหร่าน
+    # 🚨 หมวดสงครามและภูมิรัฐศาสตร์
     "iran", "iranian", "tehran", "war", "military", "missile", "strike", 
     "middle east", "escalation", "retaliation", "attack", "geopolitical"
 ]
@@ -69,7 +70,7 @@ app = Flask(__name__)
 
 seen_news = set()          # เก็บรหัสข่าวสารที่ส่งไปแล้วเพื่อไม่ให้ส่งซ้ำ
 seen_lock = Lock()
-current_bot_date = None    # ใช้บันทึกวันที่ปัจจุบันของบอทเพื่อเคลียร์หน่วยความจำตอนขึ้นวันใหม่
+current_bot_date = None    # บันทึกวันที่ปัจจุบันของบอทเพื่อเคลียร์หน่วยความจำ
 
 bot_start_lock = Lock()
 bot_started = False
@@ -98,8 +99,8 @@ def now_text():
 @app.route("/")
 def home():
     return """
-    <h1>🤖 Verified Premium Financial News Bot</h1>
-    <p>Status: Active (Filtering 100% Direct Premium Feeds | Strict Today Only)</p>
+    <h1>🤖 High-Impact Financial & Geopolitical News Bot</h1>
+    <p>Status: Active (Strict Today Only | High-Impact Filters Enabled)</p>
     <ul>
         <li><a href="/health">/health</a></li>
         <li><a href="/test-news">/test-news</a></li>
@@ -127,7 +128,7 @@ def health():
     })
 
 # =========================================================
-# UTILITIES
+# UTILITIES & DATE PARSER
 # =========================================================
 
 def clean_text(value):
@@ -149,6 +150,41 @@ def get_matched_keywords(title, description):
         if keyword.lower() in text:
             matches.append(keyword)
     return matches
+
+def get_entry_datetime(entry):
+    """แกะและแปลงเวลาจาก RSS Feed ให้เป็นเวลาไทย (GMT+7) อย่างแม่นยำ"""
+    pub_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if pub_parsed:
+        try:
+            dt_utc = datetime(*pub_parsed[:6], tzinfo=timezone.utc)
+            return dt_utc.astimezone(TZ_THAILAND)
+        except Exception:
+            pass
+
+    for date_field in ["published", "updated", "pubDate"]:
+        raw_date = entry.get(date_field)
+        if raw_date:
+            try:
+                dt = parsedate_to_datetime(str(raw_date))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(TZ_THAILAND)
+            except Exception:
+                pass
+    return None
+
+def is_high_impact_analysis(analysis_text):
+    """ตรวจสอบว่า AI ประเมินผลกระทบเป็นระดับ HIGH หรือไม่"""
+    if "⭐⭐⭐ HIGH" in analysis_text:
+        return True
+    
+    # ตรวจสอบเพิ่มเติมในโซนระดับผลกระทบ
+    lines = analysis_text.split("\n")
+    for line in lines:
+        if "ระดับผลกระทบต่อตลาด" in line or "Market Impact" in line:
+            if "HIGH" in line.upper() and "LOW" not in line.upper() and "MEDIUM" not in line.upper():
+                return True
+    return False
 
 # =========================================================
 # FETCH ONE FEED
@@ -174,7 +210,7 @@ def fetch_one_feed(url):
             if entries:
                 return entries
     except Exception as e:
-        print(f"⚠️ วิธีดึงตรงติดขัด: {e}")
+        print(f"⚠️ ดึงข้อมูลตรงติดขัด: {e}")
 
     try:
         encoded_url = quote_plus(url)
@@ -191,7 +227,7 @@ def fetch_one_feed(url):
     return []
 
 # =========================================================
-# FETCH ALL NEWS (กรองเอาเฉพาะข่าววันนี้ตามเวลาไทย)
+# FETCH ALL NEWS (กรองเฉพาะข่าววันนี้ตามเวลาไทยเท่านั้น)
 # =========================================================
 
 def fetch_latest_news():
@@ -202,14 +238,13 @@ def fetch_latest_news():
     last_status = "fetching"
     last_error = None
 
-    # ดึงวันที่ปัจจุบันของประเทศไทย (GMT+7)
     now_th = datetime.now(TZ_THAILAND)
     today_th = now_th.date()
 
-    # ระบบเคลียร์ความจำเมื่อขึ้นวันใหม่ ป้องกัน RAM เต็มและช่วยเคลียร์คิวข่าวเก่าออกไป
+    # เคลียร์ความจำข่าวเมื่อขึ้นวันใหม่
     with seen_lock:
         if current_bot_date != today_th:
-            print(f"📅 เปลี่ยนวันใหม่เป็น {today_th}: ล้างประวัติการส่งซ้ำเพื่อเริ่มวันใหม่")
+            print(f"📅 เปลี่ยนวันใหม่เป็น {today_th}: เคลียร์ประวัติข่าวเก่าเรียบร้อย")
             seen_news.clear()
             current_bot_date = today_th
 
@@ -235,21 +270,14 @@ def fetch_latest_news():
         if not title:
             continue
 
-        # --- ⏱️ กระบวนการคัดเลือกเฉพาะข่าวสารที่เกิดใน "วันนี้" เท่านั้น ---
-        pub_parsed = entry.get("published_parsed")
-        if pub_parsed:
-            try:
-                # แปลงเวลาสากลจากผู้ให้บริการ RSS
-                pub_dt_utc = datetime(*pub_parsed[:6], tzinfo=timezone.utc)
-                # ปรับให้เป็นเวลาประเทศไทย
-                pub_dt_th = pub_dt_utc.astimezone(TZ_THAILAND)
-                
-                # หากไม่ใช่วันนี้ (เช่น เป็นข่าวเมื่อวาน) คัดทิ้งทันที
-                if pub_dt_th.date() != today_th:
-                    continue
-            except Exception as time_err:
-                print(f"⚠️ ไม่สามารถแปลงเวลาข่าวได้ ข้ามไปก่อน: {time_err}")
+        # ⏱️ คัดเลือกเฉพาะข่าวสารที่เกิดขึ้นใน "วันนี้" เท่านั้น
+        pub_dt_th = get_entry_datetime(entry)
+        if pub_dt_th:
+            if pub_dt_th.date() != today_th:
                 continue
+        else:
+            # หากไม่มีข้อมูลเวลาแน่ชัด ให้ข้ามเพื่อความแม่นยำ
+            continue
 
         news_id = create_news_id(title)
         if news_id in cycle_ids:
@@ -262,7 +290,7 @@ def fetch_latest_news():
     last_check_finished = now_text()
     last_status = "fetch_success" if unique_entries else "no_news_found"
 
-    print(f"📰 UNIQUE NEWS FOUND (STRICT TODAY): {len(unique_entries)}")
+    print(f"📰 UNIQUE TODAY NEWS FOUND: {len(unique_entries)}")
     return unique_entries
 
 # =========================================================
@@ -289,7 +317,7 @@ def get_source(entry):
     return "Premium Financial News"
 
 # =========================================================
-# GROQ AI ANALYZE (ใช้ Prompt ตัวเต็มแบบมืออาชีพ)
+# GROQ AI ANALYZE (ปรับเน้นการคัดกรองความสำคัญสูงสุด)
 # =========================================================
 
 def analyze_with_groq(title, description, source):
@@ -297,14 +325,14 @@ def analyze_with_groq(title, description, source):
         return "⚠️ ไม่พบ GROQ_API_KEY"
 
     prompt = f"""
-คุณคือนักวิเคราะห์เศรษฐกิจมหภาค (Macroeconomics), ตลาดทองคำ (XAUUSD), ค่าเงินดอลลาร์ (USD) และนโยบายการเงินของ Federal Reserve (Fed) ระดับสถาบันการเงินมืออาชีพ 
+คุณคือนักวิเคราะห์เศรษฐกิจมหภาคและภูมิรัฐศาสตร์ระดับสถาบันการเงินมืออาชีพ 
 
-หน้าที่ของคุณคือวิเคราะห์ข่าวสารที่ได้รับ โดยยึดหลักเกณฑ์ที่เข้มงวดดังต่อไปนี้:
-1. อ้างอิงข้อเท็จจริง (Facts) ที่ปรากฏในเนื้อหาข่าวเท่านั้น แยกออกจากบทวิเคราะห์หรือการคาดการณ์ (Speculation) อย่างเด็ดขาด
-2. ห้ามแต่งข้อมูล หรือคาดเดาปัจจัยที่ไม่มีระบุในข่าว หากข้อมูลไม่เพียงพอสำหรับหัวข้อใด ให้ระบุตรงๆ ว่า "ข้อมูลยังไม่เพียงพอสำหรับหัวข้อนี้"
-3. ห้ามใช้คำพูดที่การันตีหรือรับประกันการเคลื่อนไหวของราคา 100% ให้ใช้คำว่า "มีแนวโน้ม", "ส่งแรงหนุน" หรือ "กดดัน" ตามหลักสถิติและเศรษฐศาสตร์
-4. หากเป็น Breaking News ให้ระบุเตือนว่า "⚠️ ตลาดอาจมีความผันผวนสูงในกรอบเวลาสั้น"
-5. เน้นการเชื่อมโยงผลกระทบเข้าสู่ 3 แกนหลักเสมอ: นโยบาย Fed -> ดัชนีดอลลาร์ (USD) -> ราคาทองคำ (XAUUSD) ในฐานะสินทรัพย์ปลอดภัย (Safe Haven) หรือสินทรัพย์ที่ไม่มีผลตอบแทนในรูปดอกเบี้ย
+หน้าที่ของคุณคือวิเคราะห์ข่าวสารและประเมินผลกระทบต่อตลาดอย่างตรงไปตรงมา โดยยึดหลักเกณฑ์ดังนี้:
+1. อ้างอิงข้อเท็จจริง (Facts) ในข่าวเท่านั้น ห้ามเดาหรือแต่งข้อมูลเพิ่มเติม
+2. ประเมินระดับผลกระทบต่อตลาด (Market Impact Level) อย่างเข้มงวดที่สุด:
+   - ⭐⭐⭐ HIGH: เฉพาะข่าวที่มีผลกระทบอย่างรุนแรงและทันที เช่น ตัวเลข CPI/NFP หลุดคาดการณ์อย่างมาก, มติอัตราดอกเบี้ย Fed/FOMC, แถลงการณ์สำคัญของ Jerome Powell/Donald Trump, หรือเหตุการณ์สงคราม/การโจมตีทางทหารระดับรุนแรง
+   - ⭐⭐ MEDIUM: ข่าวตัวเลขเศรษฐกิจทั่วไป หรือข่าวที่มีผลกระทบจำกัด
+   - ⭐ LOW: ข่าวบทวิเคราะห์ทั่วไป ข่าวความคิดเห็น หรือข่าวที่มีผลกระทบต่ำมาก
 
 วิเคราะห์เนื้อหาข่าวต่อไปนี้:
 =========================
@@ -313,43 +341,36 @@ def analyze_with_groq(title, description, source):
 แหล่งข่าว: {source}
 =========================
 
-ให้แสดงผลลัพธ์ในรูปแบบ (Template) ด้านล่างนี้อย่างเคร่งครัด ห้ามแก้ไขหัวข้อ:
+แสดงผลลัพธ์ตาม Template ด้านล่างนี้อย่างเคร่งครัด:
 
 📌 สรุปข่าว
-• [สรุปประเด็นสำคัญที่สุดไม่เกิน 4 บรรทัด กระชับ และตรงประเด็นเชิงโครงสร้างเศรษฐกิจ]
+• [สรุปประเด็นสำคัญไม่เกิน 3 บรรทัด]
 
 🎯 ประเภทข่าว
-[เลือกคำตอบที่ถูกต้องที่สุดเพียงข้อเดียวจากรายการนี้: Fed | Donald Trump | Inflation | Interest Rate | CPI | PPI | NFP | GDP | FOMC | Tariff | Geopolitics | Gold | USD | Other]
+[เลือก 1 ข้อ: Fed | Donald Trump | Inflation | Interest Rate | CPI | PPI | NFP | GDP | FOMC | Tariff | Geopolitics | Gold | USD | Other]
 
 🏦 ผลต่อ Fed
-• [วิเคราะห์เชิงลึกว่าข่าวนี้ส่งผลต่อทิศทางอัตราดอกเบี้ยของ Fed อย่างไร เช่น เพิ่มโอกาสในการ (ขึ้น/คง/ลด) ดอกเบี้ย พร้อมระบุเหตุผลทางเศรษฐศาสตร์จากข่าว]
+• [วิเคราะห์ผลกระทบต่อแนวโน้มอัตราดอกเบี้ย Fed]
 
 💵 ผลต่อ USD (ดัชนีดอลลาร์)
 • **[🟢 BULLISH / 🔴 BEARISH / 🟡 UNCERTAIN]** 
-• เหตุผล: [อธิบายความสัมพันธ์ไม่เกิน 3 บรรทัด เช่น ตัวเลขเศรษฐกิจแข็งแกร่งกว่าคาด ส่งผลหนุนให้ดอลลาร์แข็งค่า]
+• เหตุผล: [อธิบายสั้นๆ 1-2 บรรทัด]
 
 🥇 ผลต่อ GOLD (XAUUSD)
 • **[🟢 BULLISH / 🔴 BEARISH / 🟡 UNCERTAIN]** 
-• เหตุผล: [อธิบายเหตุผลไม่เกิน 3 บรรทัด โดยระบุให้ชัดเจนว่าข่าวนี้ "หนุน" หรือ "กดดัน" ทองคำในฐานะ Safe Haven หรือผ่านกลไก Opportunity Cost ของอัตราผลตอบแทนพันธบัตร/ดอลลาร์]
+• เหตุผล: [อธิบายสั้นๆ 1-2 บรรทัด]
 
 🌍 ความเสี่ยงทางภูมิรัฐศาสตร์ (Geopolitical Risk)
 • **[LOW / MEDIUM / HIGH]**
-• เหตุผลย่อ: [อธิบายสั้นๆ ว่าข่าวนี้ส่งผลต่อความตึงเครียดระดับโลกหรือความปลอดภัยในระบบการเงินอย่างไร]
 
 📊 ระดับผลกระทบต่อตลาด (Market Impact Level)
-• **[⭐ LOW / ⭐⭐ MEDIUM / ⭐⭐⭐ HIGH]**
-*(หมายเหตุ: หากเป็นข่าวเกี่ยวกับ Trump, Powell, Fed, CPI, NFP หรือเหตุการณ์สงคราม ให้พิจารณาปรับระดับเป็น MEDIUM ถึง HIGH เสมอ)*
+• **[เลือกเพียง 1 ข้อ: ⭐ LOW / ⭐⭐ MEDIUM / ⭐⭐⭐ HIGH]**
 
 ⏳ คาดการณ์แนวโน้มทิศทางราคา
-• **ระยะสั้น (0-24 ชั่วโมง):** [UP / DOWN / SIDEWAYS]
-• **ระยะกลาง (1-7 วัน):** [UP / DOWN / SIDEWAYS]
-
-📈 ความเชื่อมั่นของการวิเคราะห์ (Confidence Score)
-• **ระดับความเชื่อมั่น:** [ระบุเป็นเปอร์เซ็นต์ 0-100%]
-• **เหตุผล:** [อธิบายสั้นๆ ว่าทำไมจึงให้คะแนนเท่านี้ เช่น ข้อมูลในข่าวมีความชัดเจนสูง หรือข่าวยังขาดตัวเลขสถิติอ้างอิงเชิงปริมาณ]
+• **ระยะสั้น (0-24 ชม.):** [UP / DOWN / SIDEWAYS]
 
 ⚠️ ปัจจัยเสี่ยงที่ต้องเฝ้าระวัง (Watchlist)
-• [ระบุเหตุการณ์หรือตัวเลขเศรษฐกิจถัดไปที่อาจพลิกสถานการณ์หรือลบล้างผลการวิเคราะห์นี้ เช่น ตัวเลข CPI ที่จะประกาศศุกร์นี้, ถ้อยแถลงของ Powell, Breaking News ด้านสงคราม ฯลฯ]
+• [ระบุเหตุการณ์ถัดไปที่ต้องจับตา]
 """
 
     headers = {
@@ -359,7 +380,7 @@ def analyze_with_groq(title, description, source):
     payload = {
         "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,  # ลด Temp เพื่อลดการมโนและเน้นข้อเท็จจริงมากขึ้น
+        "temperature": 0.1,
         "max_tokens": 800,
     }
 
@@ -401,7 +422,7 @@ def send_telegram(text):
         return False
 
 # =========================================================
-# PROCESS NEWS (ระบบป้องกันข่าวซ้ำแบบ Realtime)
+# PROCESS NEWS (กรองส่งเฉพาะข่าวความสำคัญสูงสุด HIGH IMPACT)
 # =========================================================
 
 def process_news(entries):
@@ -421,20 +442,29 @@ def process_news(entries):
         if not title or not link or not link.startswith("http"):
             continue
 
-        # 🔒 ตรวจสอบการส่งซ้ำแบบ Thread-safe 
         news_id = create_news_id(title)
         with seen_lock:
             if news_id in seen_news:
-                continue  # ถ้าพบ ID ในระบบบันทึกความจำแล้ว ให้ข้ามทันทีไม่มีส่งซ้ำ[cite: 5]
+                continue
 
         matches = get_matched_keywords(title, description)
         if not matches:
             continue
 
         relevant_count += 1
-        print(f"🎯 MATCHED TODAY NEWS: {title}")
+        print(f"🔎 ANALYZING TODAY NEWS: {title}")
 
+        # ให้ AI วิเคราะห์ข่าวก่อน
         analysis = analyze_with_groq(title, description, source)
+
+        # 🚨 ระบบคัดกรองความสำคัญ: ส่งเฉพาะข่าวที่มีผลกระทบระดับ ⭐⭐⭐ HIGH เท่านั้น
+        if not is_high_impact_analysis(analysis):
+            print(f"⏩ SKIP: คัดทิ้งเนื่องจากไม่ใช่ข่าวความสำคัญสูงสุด (Low/Medium Impact)")
+            with seen_lock:
+                seen_news.add(news_id)  # บันทึกว่าตรวจแล้ว ไม่ต้องนำกลับมาวิเคราะห์ซ้ำ
+            continue
+
+        print(f"🔥 HIGH IMPACT DETECTED! Preparing to send: {title}")
 
         safe_title = html.escape(title)
         safe_source = html.escape(source)
@@ -442,24 +472,24 @@ def process_news(entries):
         safe_link = html.escape(link, quote=True)
 
         message = (
-            "🚨 <b>GOLD & GEOPOLITICAL ANALYSIS</b>\n\n"
+            "🚨 <b>HIGH-IMPACT NEWS ALERT</b>\n\n"
             f"📰 <b>{safe_title}</b>\n\n"
             f"🏢 <b>Source:</b> {safe_source}\n\n"
             f"{safe_analysis}\n\n"
-            f"🔗 <a href=\"{safe_link}\">คลิกอ่านข่าวฉบับเต็ม</a>"
+            f"🔗 <a href=\"{safe_link}\">อ่านข่าวฉบับเต็ม</a>"
         )
 
         success = send_telegram(message)
         if success:
             with seen_lock:
-                seen_news.add(news_id)  # บันทึกสถานะว่าส่งสำเร็จแล้ว ป้องกันลูปถัดไปส่งซ้ำ[cite: 5]
+                seen_news.add(news_id)
             sent_this_cycle += 1
             total_sent += 1
-            print("✅ SENT TO TELEGRAM SUCCESS")
+            print("✅ SENT HIGH IMPACT NEWS TO TELEGRAM")
         time.sleep(2)
 
     last_relevant_count = relevant_count
-    print(f"📊 Cycle Summary -> Matches: {relevant_count} | Sent: {sent_this_cycle}")
+    print(f"📊 Cycle Summary -> Matches: {relevant_count} | High-Impact Sent: {sent_this_cycle}")
     return sent_this_cycle
 
 # =========================================================
@@ -497,7 +527,7 @@ def run_news_cycle():
         bot_running = False
 
 # =========================================================
-# BACKGROUND LOOP (ระบบออโตเมติกรันอัตโนมัติเบื้องหลัง)
+# BACKGROUND LOOP
 # =========================================================
 
 def bot_loop():
